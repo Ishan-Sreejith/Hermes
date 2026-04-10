@@ -11,4 +11,5 @@ htmlcov/
 .DS_Store
 p2pchat.egg-info/
 .p2pchat/
+tests/
 
