@@ -1,0 +1,37 @@
+{
+  "transport_mode": "fallback",
+  "fallback_order": [
+    "direct",
+    "holepunch",
+    "hermes"
+  ],
+  "direct_timeout_s": 3,
+  "holepunch_timeout_s": 5,
+  "hermes_host": "127.0.0.1",
+  "hermes_port": 7777,
+  "stun_host": "stun.l.google.com",
+  "stun_port": 19302,
+  "crypto": {
+    "default_mode": "none",
+    "allow_plaintext": true,
+    "active_plugin": null
+  },
+  "ui": {
+    "timestamp": true,
+    "show_peer_id": false,
+    "compact_tui": true,
+    "hosted_web_ui_url": null
+  },
+  "cloud": {
+    "backend": "firebase",
+    "enabled": false,
+    "project_id": null,
+    "database_url": null,
+    "queue_path": "messages",
+    "delivery_ttl_s": 300,
+    "credentials_path": null,
+    "service_account_json": null,
+    "hosting_enabled": false,
+    "hosting_site": null
+  }
+}

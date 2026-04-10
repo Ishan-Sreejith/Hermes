@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "p2pchat"
+version = "0.1.0"
+description = "Terminal-first P2P chat app with Hermes relay and localhost web UI"
+requires-python = ">=3.10"
+dependencies = [
+  "cryptography",
+  "flask",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=9.0.0",
+  "pytest-asyncio>=1.0.0",
+]
+firebase = [
+  "firebase-admin",
+]
+
+[project.scripts]
+p2pchat = "p2pchat.main:main"
+hermes = "p2pchat.main:main"
+hermes-server = "p2pchat.hermes_server:main"
+web-ui = "p2pchat.web_ui.app:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["p2pchat*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
