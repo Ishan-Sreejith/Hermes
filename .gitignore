@@ -8,8 +8,29 @@ __pycache__/
 htmlcov/
 .venv/
 .env
+.env.*
 .DS_Store
 p2pchat.egg-info/
 .p2pchat/
 tests/
 
+# Local tooling and editor state
+.agents/
+.claude/
+.continue/
+.junie/
+.kilocode/
+.idea/
+.vscode/
+.github/
+skills/
+skills-lock.json
+p2pchat/scratch/
+
+# Firebase local state and credentials
+.firebase/
+.firebaserc
+serviceAccountKey.json
+service-account*.json
+*firebase*credentials*.json
+public/firebase-config.js

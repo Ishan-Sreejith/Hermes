@@ -1,620 +1,595 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
+import logging
+import os
+import secrets
 import socket
+import struct
 import time
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import Any, Callable
 from uuid import uuid4
 
-from .protocol import read_message, write_message
+logger = logging.getLogger("transport")
 
 
 @dataclass
 class Connection:
-    reader: asyncio.StreamReader | None = None
-    writer: asyncio.StreamWriter | None = None
     peer_id: str | None = None
-    kind: str = "direct"
-    udp_socket: socket.socket | None = None
-    udp_peer: tuple[str, int] | None = None
+    kind: str = "firebase_rest"
+    ip: str | None = None
+    port: int | None = None
 
 
-class CloudQueueClient:
-    """Abstract cloud queue transport used for Firebase-style fallback."""
-
-    async def enqueue(self, msg: dict[str, Any]) -> bool:
-        return False
-
-    async def poll(self, on_message: Callable[[dict], None]) -> int:
-        return 0
-
-    async def delete(self, msg_id: str) -> bool:
-        return False
-
-
-class FirebaseCloudQueueClient(CloudQueueClient):
-    """Firebase Realtime Database queue backend.
-
-    The implementation prefers the Firebase Admin SDK when available, but also
-    supports a REST fallback using a service account JSON or anonymous database
-    URL for local testing. Queue messages are stored under a per-recipient path
-    and deleted once successfully delivered.
-    """
-
+class FirebaseTransport:
     def __init__(self, config: Any, identity: Any):
         self.config = config
         self.identity = identity
-        self.enabled = bool(getattr(config.cloud, "enabled", False))
-        self.backend = getattr(config.cloud, "backend", "firebase")
-        self.queue_path = getattr(config.cloud, "queue_path", "messages")
-        self.project_id = getattr(config.cloud, "project_id", None)
-        self.database_url = getattr(config.cloud, "database_url", None)
-        self.credentials_path = getattr(config.cloud, "credentials_path", None)
-        self.service_account_json = getattr(config.cloud, "service_account_json", None)
-        self.delivery_ttl_s = int(getattr(config.cloud, "delivery_ttl_s", 300))
-        self._firebase_app = None
-        self._db = None
-        self._init_error: Exception | None = None
-        self._rest_token: str | None = None
-        self._rest_token_expiry: float = 0.0
-        if self.enabled and self.backend == "firebase":
-            self._initialize_backend()
-
-    def _initialize_backend(self) -> None:
-        try:
-            import firebase_admin  # type: ignore
-            from firebase_admin import credentials, db  # type: ignore
-        except Exception as exc:  # pragma: no cover - optional dependency path
-            self._init_error = exc
-            return
-
-        try:
-            if firebase_admin._apps:  # type: ignore[attr-defined]
-                self._firebase_app = firebase_admin.get_app()
-            else:
-                cred = None
-                cred_path = self.credentials_path or self.service_account_json
-                if cred_path:
-                    cred = credentials.Certificate(cred_path)
-                elif self.project_id:
-                    cred = credentials.ApplicationDefault()
-                if self.database_url:
-                    self._firebase_app = firebase_admin.initialize_app(cred, {"databaseURL": self.database_url})
-                else:
-                    self._firebase_app = firebase_admin.initialize_app(cred)
-            self._db = db
-        except Exception as exc:  # pragma: no cover - optional dependency path
-            self._init_error = exc
-
-    def _queue_root(self) -> str:
-        return self.queue_path.strip("/") or "messages"
-
-    def _recipient_path(self, peer_id: str) -> str:
-        return f"{self._queue_root()}/{peer_id}"
-
-    def _message_payload(self, msg: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "id": msg.get("id") or str(uuid4()),
-            "type": msg.get("type", "msg"),
-            "from_id": msg.get("from_id"),
-            "from_name": msg.get("from_name"),
-            "to": msg.get("to"),
-            "channel": msg.get("channel"),
-            "ts": float(msg.get("ts") or time.time()),
-            "enc": msg.get("enc", "none"),
-            "body": msg.get("body", ""),
-            "delivered": False,
-            "claimed_by": None,
-            "claimed_at": None,
-            "expires_at": float(msg.get("expires_at") or (time.time() + self.delivery_ttl_s)),
-        }
-
-    async def _rest_authorized_headers(self) -> dict[str, str]:
-        if self._rest_token and time.time() < self._rest_token_expiry - 60:
-            return {"Authorization": f"Bearer {self._rest_token}"}
-        if not self.service_account_json:
-            return {}
-        try:
-            import google.auth.transport.requests  # type: ignore
-            from google.oauth2 import service_account  # type: ignore
-        except Exception:
-            return {}
-        creds = service_account.Credentials.from_service_account_file(
-            self.service_account_json,
-            scopes=["https://www.googleapis.com/auth/firebase.database", "https://www.googleapis.com/auth/userinfo.email"],
+        self.db_url = (
+            getattr(getattr(config, "cloud", None), "database_url", None)
+            or os.getenv("HERMES_FIREBASE_DB_URL")
+            or ""
         )
-        request = google.auth.transport.requests.Request()
-        creds.refresh(request)
-        self._rest_token = creds.token
-        self._rest_token_expiry = float(getattr(creds, "expiry", None).timestamp() if getattr(creds, "expiry", None) else time.time() + 3000)
-        return {"Authorization": f"Bearer {self._rest_token}"}
+        self._seen_ids = set()
+        self._last_key_by_path: dict[str, str] = {}
+        self._active_tasks = {}
 
-    def _db_url(self) -> str | None:
-        if self.database_url:
-            return self.database_url.rstrip("/")
-        if self.project_id:
-            return f"https://{self.project_id}-default-rtdb.firebaseio.com"
-        return None
+    def _request(self, path: str, method: str = "GET", data: Any = None, params: dict | None = None) -> Any:
+        if not self.db_url:
+            logger.error("Firebase database URL is not configured")
+            return None
+        url = f"{self.db_url}/{path}.json"
+        if params:
+            url += "?" + urllib.parse.urlencode(params)
 
-    async def enqueue(self, msg: dict[str, Any]) -> bool:
-        if not self.enabled or self.backend != "firebase":
-            return False
-        payload = self._message_payload(msg)
-        target = str(payload.get("to") or payload.get("channel") or "*")
-        recipient = target if target != "*" else "broadcast"
-        if self._db is not None and self._firebase_app is not None:
+        try:
+            req_data = json.dumps(data).encode("utf-8") if data is not None else None
+            req = urllib.request.Request(url, data=req_data, method=method)
+            req.add_header("Content-Type", "application/json")
+
+            with urllib.request.urlopen(req, timeout=10) as response:
+                res_body = response.read().decode("utf-8")
+                return json.loads(res_body) if res_body else {}
+        except Exception as e:
+            logger.error("Firebase REST error at %s: %s", path, e)
+            return None
+
+    async def authenticate(self, username, password) -> dict:
+        hashed = sha256(password.encode()).hexdigest()
+        data = self._request(f"users/{username}")
+
+        if data and isinstance(data, dict) and "password" in data:
+            if data.get("password") == hashed:
+                return {"ok": True, "peer_id": data["peer_id"], "username": username}
+            return {"ok": False, "error": "Invalid password"}
+
+        peer_id = str(uuid4())
+        res = self._request(f"users/{username}", method="PUT", data={"password": hashed, "peer_id": peer_id})
+        if res is None:
+            return {"ok": False, "error": "Network error during registration"}
+        return {"ok": True, "peer_id": peer_id, "username": username}
+
+    async def join_room(self, room_name, password=None) -> dict:
+        safe_name = room_name.replace("@", "").lower()
+        room_data = self._request(f"rooms/{safe_name}")
+
+        hashed = sha256(password.encode()).hexdigest() if password else None
+        if room_data and isinstance(room_data, dict) and room_data.get("password"):
+            if room_data["password"] != hashed:
+                return {"ok": False, "error": f"Wrong password for {room_name}"}
+        elif not room_data:
+            self._request(f"rooms/{safe_name}", method="PUT", data={"password": hashed, "created_at": time.time()})
+
+        path = f"messages/chan_{safe_name}" if safe_name != "broadcast" else "messages/broadcast"
+        return {"ok": True, "path": path}
+
+    def _mark_seen(self, path: str, key: str):
+        self._seen_ids.add(f"{path}:{key}")
+        self._last_key_by_path[path] = key
+
+    def _is_seen(self, path: str, key: str) -> bool:
+        return f"{path}:{key}" in self._seen_ids
+
+    def _normalize_msg(self, path: str, msg_key: str, raw_msg: Any) -> dict | None:
+        if not isinstance(raw_msg, dict):
+            return None
+        msg = dict(raw_msg)
+        if not msg.get("id"):
+            msg["id"] = msg_key
+        msg["_firebase_key"] = msg_key
+        self._mark_seen(path, msg_key)
+        return msg
+
+    async def poll_loop(self, path: str, callback: Callable):
+        while True:
             try:
-                ref = self._db.reference(self._recipient_path(recipient), app=self._firebase_app)
-                ref.child(payload["id"]).set(payload)
-                return True
-            except Exception as exc:
-                self._init_error = exc
-                return False
-        return await self._enqueue_rest(recipient, payload)
+                cursor = self._last_key_by_path.get(path)
+                if cursor:
+                    data = self._request(
+                        path,
+                        params={"orderBy": '"$key"', "startAt": f'"{cursor}"', "limitToFirst": 100},
+                    )
+                else:
+                    data = self._request(path, params={"orderBy": '"$key"', "limitToLast": 20})
+                if isinstance(data, dict):
+                    for msg_id in sorted(data.keys()):
+                        if self._is_seen(path, msg_id):
+                            continue
+                        msg = self._normalize_msg(path, msg_id, data[msg_id])
+                        if msg is not None:
+                            callback(msg)
+                await asyncio.sleep(1.0)
+            except Exception:
+                await asyncio.sleep(3.0)
 
-    async def _enqueue_rest(self, recipient: str, payload: dict[str, Any]) -> bool:
-        import urllib.request
+    def listen(self, path, callback):
+        if path in self._active_tasks:
+            return
+        task = asyncio.create_task(self.poll_loop(path, callback))
+        self._active_tasks[path] = task
 
-        base = self._db_url()
-        if not base:
-            return False
-        url = f"{base}/{self._recipient_path(recipient)}.json"
-        headers = {"Content-Type": "application/json"}
-        headers.update(await self._rest_authorized_headers())
-        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="PATCH")
-        try:
-            with urllib.request.urlopen(req, timeout=5):
-                return True
-        except Exception as exc:
-            self._init_error = exc
-            return False
+    async def fetch_history(self, path: str, limit: int = 50) -> list[dict]:
+        data = self._request(path, params={"orderBy": '"$key"', "limitToLast": limit})
+        msgs = []
+        if isinstance(data, dict):
+            for msg_id in sorted(data.keys()):
+                msg = self._normalize_msg(path, msg_id, data[msg_id])
+                if msg is not None:
+                    msgs.append(msg)
+        return msgs
 
-    async def poll(self, on_message: Callable[[dict], None]) -> int:
-        if not self.enabled or self.backend != "firebase":
-            return 0
-        if self._db is not None and self._firebase_app is not None:
-            return await self._poll_admin(on_message)
-        return await self._poll_rest(on_message)
-
-    async def _poll_admin(self, on_message: Callable[[dict], None]) -> int:
-        delivered = 0
-        try:
-            recipient = self._recipient_path(self.identity.peer_id)
-            ref = self._db.reference(recipient, app=self._firebase_app)
-            payloads = ref.get() or {}
-            now = time.time()
-            for msg_id, payload in list(payloads.items()):
-                if not isinstance(payload, dict):
+    async def fetch_new(self, path: str, limit: int = 100) -> list[dict]:
+        cursor = self._last_key_by_path.get(path)
+        if cursor:
+            params = {"orderBy": '"$key"', "startAt": f'"{cursor}"', "limitToFirst": limit}
+        else:
+            params = {"orderBy": '"$key"', "limitToLast": max(20, min(limit, 100))}
+        data = self._request(path, params=params)
+        msgs = []
+        if isinstance(data, dict):
+            for msg_id in sorted(data.keys()):
+                if self._is_seen(path, msg_id):
                     continue
-                expires_at = float(payload.get("expires_at") or 0)
-                if expires_at and expires_at < now:
-                    ref.child(msg_id).delete()
-                    continue
-                if payload.get("claimed_by") and payload.get("claimed_by") != self.identity.peer_id:
-                    continue
-                payload["claimed_by"] = self.identity.peer_id
-                payload["claimed_at"] = now
-                ref.child(msg_id).update({"claimed_by": self.identity.peer_id, "claimed_at": now})
-                on_message(payload)
-                ref.child(msg_id).delete()
-                delivered += 1
-        except Exception as exc:
-            self._init_error = exc
-        return delivered
+                msg = self._normalize_msg(path, msg_id, data[msg_id])
+                if msg is not None:
+                    msgs.append(msg)
+        return msgs
 
-    async def _poll_rest(self, on_message: Callable[[dict], None]) -> int:
-        import urllib.request
+    async def send(self, path, msg) -> bool:
+        res = self._request(path, method="POST", data=msg)
+        return res is not None
 
-        base = self._db_url()
-        if not base:
-            return 0
-        recipient = self._recipient_path(self.identity.peer_id)
-        url = f"{base}/{recipient}.json"
-        headers = await self._rest_authorized_headers()
-        req = urllib.request.Request(url, headers=headers, method="GET")
-        delivered = 0
-        try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.loads(resp.read().decode("utf-8") or "{}")
-            now = time.time()
-            for msg_id, payload in list((data or {}).items()):
-                if not isinstance(payload, dict):
-                    continue
-                expires_at = float(payload.get("expires_at") or 0)
-                if expires_at and expires_at < now:
-                    await self.delete(msg_id)
-                    continue
-                payload["claimed_by"] = self.identity.peer_id
-                payload["claimed_at"] = now
-                on_message(payload)
-                await self.delete(msg_id)
-                delivered += 1
-        except Exception as exc:
-            self._init_error = exc
-        return delivered
+    def update_presence(
+        self,
+        ip: str,
+        tcp_port: int,
+        *,
+        udp_port: int | None = None,
+        stun_ip: str | None = None,
+        stun_port: int | None = None,
+    ):
+        path = f"presence/{self.identity.peer_id}"
+        data = {
+            "id": self.identity.peer_id,
+            "name": self.identity.username,
+            "online": True,
+            "public": True,
+            "updatedAt": {".sv": "timestamp"},
+            "ip": ip,
+            "port": tcp_port,
+            "udp_port": udp_port,
+            "stun_ip": stun_ip,
+            "stun_port": stun_port,
+        }
+        self._request(path, method="PUT", data=data)
 
-    async def delete(self, msg_id: str) -> bool:
-        if not self.enabled or self.backend != "firebase":
-            return False
-        if self._db is not None and self._firebase_app is not None:
-            try:
-                ref = self._db.reference(self._recipient_path(self.identity.peer_id), app=self._firebase_app)
-                ref.child(msg_id).delete()
-                return True
-            except Exception as exc:
-                self._init_error = exc
-                return False
-        return await self._delete_rest(msg_id)
-
-    async def _delete_rest(self, msg_id: str) -> bool:
-        import urllib.request
-
-        base = self._db_url()
-        if not base:
-            return False
-        url = f"{base}/{self._recipient_path(self.identity.peer_id)}/{msg_id}.json"
-        headers = await self._rest_authorized_headers()
-        req = urllib.request.Request(url, headers=headers, method="DELETE")
-        try:
-            with urllib.request.urlopen(req, timeout=5):
-                return True
-        except Exception as exc:
-            self._init_error = exc
-            return False
+    def get_peer_presence(self, peer_id: str) -> dict | None:
+        return self._request(f"presence/{peer_id}")
 
 
 class DirectPeer:
-    """TCP peer connection."""
-
-    def __init__(self, listen_port: int = 0):
-        self.listen_port = listen_port
-        self.server: asyncio.base_events.Server | None = None
-        self.on_message: Callable[[dict], None] | None = None
-        self.udp_socket: socket.socket | None = None
-        self.udp_task: asyncio.Task | None = None
+    def __init__(self, on_message: Callable | None = None):
+        self.on_message = on_message
+        self.tcp_server: asyncio.Server | None = None
+        self.tcp_port: int | None = None
+        self.udp_transport: asyncio.DatagramTransport | None = None
         self.udp_port: int | None = None
 
-    async def connect(self, host: str, port: int, timeout: float = 3.0) -> Connection | None:
-        """Connect to a peer via TCP."""
-        try:
-            reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
-            return Connection(reader=reader, writer=writer, kind="direct")
-        except (asyncio.TimeoutError, OSError):
-            return None
+    async def listen_tcp(self, port: int = 0) -> int:
+        if self.tcp_server:
+            self.tcp_server.close()
+            await self.tcp_server.wait_closed()
+            self.tcp_server = None
+        self.tcp_server = await asyncio.start_server(self._handle_tcp_connection, "0.0.0.0", port)
+        self.tcp_port = int(self.tcp_server.sockets[0].getsockname()[1])
+        return self.tcp_port
 
-    async def listen(self, port: int = 0) -> int:
-        """Start listening for incoming connections."""
+    async def _handle_tcp_connection(self, reader, writer):
+        from .protocol import read_message
 
-        async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-            try:
-                while True:
-                    msg = await read_message(reader)
-                    if msg is None:
-                        break
-                    if self.on_message:
-                        self.on_message(msg)
-            finally:
-                writer.close()
-                await writer.wait_closed()
-
-        self.server = await asyncio.start_server(handle_client, "0.0.0.0", port)
-        addr = self.server.sockets[0].getsockname()
-        self.listen_port = int(addr[1])
-        return self.listen_port
-
-    async def listen_udp(self, port: int = 0) -> int:
-        loop = asyncio.get_running_loop()
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(("0.0.0.0", port))
-        sock.setblocking(False)
-        self.udp_socket = sock
-        self.udp_port = sock.getsockname()[1]
-        self.udp_task = loop.create_task(self._udp_receive_loop())
-        return self.udp_port
-
-    async def _udp_receive_loop(self) -> None:
-        assert self.udp_socket is not None
-        loop = asyncio.get_running_loop()
-        while self.udp_socket:
-            try:
-                data, addr = await loop.sock_recvfrom(self.udp_socket, 65535)
-            except (OSError, asyncio.CancelledError):
+        while True:
+            msg = await read_message(reader)
+            if msg is None:
                 break
-            if not data:
-                continue
-            try:
-                msg = json.loads(data.decode("utf-8"))
-            except Exception:
-                continue
-            if msg.get("type") == "holepunch_ack":
-                continue
-            msg["_udp_addr"] = addr
-            if self.on_message:
+            if self.on_message and isinstance(msg, dict):
                 self.on_message(msg)
 
-    async def udp_send(self, payload: dict[str, Any], host: str, port: int) -> bool:
-        if not self.udp_socket:
-            return False
-        loop = asyncio.get_running_loop()
+        writer.close()
+        await writer.wait_closed()
+
+    async def send_tcp(self, ip: str, port: int, msg: dict, timeout_s: float = 3.0) -> bool:
+        from .protocol import write_message
+
         try:
-            await loop.sock_sendto(self.udp_socket, json.dumps(payload).encode("utf-8"), (host, port))
-            return True
-        except OSError:
+            reader, writer = await asyncio.wait_for(asyncio.open_connection(ip, int(port)), timeout=timeout_s)
+            ok = await write_message(writer, msg)
+            writer.close()
+            await writer.wait_closed()
+            return ok
+        except Exception:
             return False
 
-    async def close_udp(self) -> None:
-        if self.udp_task:
-            self.udp_task.cancel()
-            with contextlib.suppress(Exception):
-                await self.udp_task
-            self.udp_task = None
-        if self.udp_socket:
-            self.udp_socket.close()
-            self.udp_socket = None
-
-
-class HolePuncher:
-    def __init__(self, direct_peer: DirectPeer, hermes: "HermesClient", stun_host: str, stun_port: int, timeout_s: int = 5):
-        self.direct_peer = direct_peer
-        self.hermes = hermes
-        self.stun_host = stun_host
-        self.stun_port = stun_port
-        self.timeout_s = timeout_s
-
-    async def _stun_discover(self, udp_port: int) -> tuple[str, int] | None:
-        loop = asyncio.get_running_loop()
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(("0.0.0.0", udp_port))
-        sock.setblocking(False)
-        try:
-            req = b"\x00\x01" + b"\x00" * 18
-            await loop.sock_sendto(sock, req, (self.stun_host, self.stun_port))
-            try:
-                data, addr = await asyncio.wait_for(loop.sock_recvfrom(sock, 2048), timeout=self.timeout_s)
-                if data:
-                    return addr[0], int(addr[1])
-            except asyncio.TimeoutError:
-                return None
-        finally:
-            sock.close()
-        return None
-
-    async def punch(self, peer_id: str, rendezvous_host: str | None, rendezvous_port: int | None, signal_payload: dict[str, Any] | None = None) -> Connection | None:
-        await self.direct_peer.listen_udp(0)
-        local_port = self.direct_peer.udp_port or 0
-        local_public = await self._stun_discover(local_port)
-        if not local_public:
+    async def connect(self, peer_id: str, ip: str, port: int, timeout_s: float = 3.0) -> Connection | None:
+        probe = {"type": "ping", "from_id": peer_id, "ts": time.time()}
+        ok = await self.send_tcp(ip, port, probe, timeout_s=timeout_s)
+        if not ok:
             return None
-        public_host, public_port = local_public
-        await self.hermes.send({
-            "type": "relay",
-            "to": peer_id,
-            "body": {
-                "type": "holepunch_signal",
-                "from_id": self.hermes.peer_id,
-                "peer_id": peer_id,
-                "public_host": public_host,
-                "public_port": public_port,
-                "signal": signal_payload or {},
-            },
-        })
-        deadline = time.time() + self.timeout_s
-        while time.time() < deadline:
-            if rendezvous_host and rendezvous_port:
-                await self.direct_peer.udp_send({"type": "holepunch_ping", "from_id": self.hermes.peer_id, "peer_id": peer_id}, rendezvous_host, rendezvous_port)
-            await asyncio.sleep(0.25)
-        if self.direct_peer.udp_socket:
-            return Connection(peer_id=peer_id, kind="holepunch", udp_socket=self.direct_peer.udp_socket, udp_peer=(public_host, public_port))
-        return None
+        return Connection(peer_id=peer_id, kind="direct", ip=ip, port=int(port))
+
+    class _UDPProtocol(asyncio.DatagramProtocol):
+        def __init__(self, owner: "DirectPeer"):
+            self.owner = owner
+
+        def datagram_received(self, data: bytes, addr):
+            try:
+                payload = json.loads(data.decode("utf-8"))
+                if isinstance(payload, dict) and payload.get("kind") == "p2p-probe":
+                    return
+                if isinstance(payload, dict) and payload.get("kind") == "p2p-msg" and isinstance(payload.get("msg"), dict):
+                    payload = payload["msg"]
+                if self.owner.on_message and isinstance(payload, dict):
+                    self.owner.on_message(payload)
+            except Exception:
+                pass
+
+    async def listen_udp(self, port: int = 0) -> int:
+        if self.udp_transport:
+            self.udp_transport.close()
+            self.udp_transport = None
+
+        loop = asyncio.get_running_loop()
+        transport, _ = await loop.create_datagram_endpoint(
+            lambda: DirectPeer._UDPProtocol(self), local_addr=("0.0.0.0", int(port))
+        )
+        self.udp_transport = transport
+        self.udp_port = int(transport.get_extra_info("sockname")[1])
+        return self.udp_port
+
+    async def send_udp(self, ip: str, port: int, msg: dict) -> bool:
+        if not self.udp_transport:
+            return False
+        try:
+            payload = json.dumps(msg, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            self.udp_transport.sendto(payload, (ip, int(port)))
+            return True
+        except Exception:
+            return False
+
+    async def close_udp(self):
+        if self.udp_transport:
+            self.udp_transport.close()
+            self.udp_transport = None
+        self.udp_port = None
 
 
 class HermesClient:
-    """Relay client for Hermes server."""
-
     def __init__(self, host: str, port: int, peer_id: str):
         self.host = host
-        self.port = port
+        self.port = int(port)
         self.peer_id = peer_id
         self.reader: asyncio.StreamReader | None = None
         self.writer: asyncio.StreamWriter | None = None
-        self.on_message: Callable[[dict], None] | None = None
-        self._backoff = 1.0
-        self._max_backoff = 30.0
-        self._reconnect_task: asyncio.Task | None = None
-        self._closing = False
 
     async def connect(self):
-        if self._closing:
-            return self
         try:
             self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
-            await write_message(self.writer, {"type": "register", "peer_id": self.peer_id, "channels": []})
-            self._backoff = 1.0
-            asyncio.create_task(self._receive_loop())
             return self
-        except OSError as e:
-            print(f"Failed to connect to Hermes: {e}")
-            self._schedule_reconnect()
-            return self
+        except Exception:
+            self.reader = None
+            self.writer = None
+            return None
 
-    async def _receive_loop(self):
+    async def send(self, msg: dict):
+        from .protocol import write_message
+
+        if not self.writer:
+            return False
+        return await write_message(self.writer, msg)
+
+
+class HolePuncher:
+    def __init__(
+        self,
+        direct_peer: DirectPeer,
+        hermes: HermesClient | None,
+        stun_host: str,
+        stun_port: int,
+        timeout_s: int = 5,
+    ):
+        self.direct_peer = direct_peer
+        self.hermes = hermes
+        self.stun_host = stun_host
+        self.stun_port = int(stun_port)
+        self.timeout_s = int(timeout_s)
+
+    async def _stun_discover(self, local_port: int) -> tuple[str, int] | None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setblocking(False)
         try:
-            while self.reader and self.writer and not self._closing:
-                msg = await read_message(self.reader)
-                if msg is None:
-                    break
-                if self.on_message:
-                    self.on_message(msg)
-        except asyncio.CancelledError:
-            return
-        except Exception as e:
-            print(f"Hermes receive error: {e}")
-        finally:
-            self._schedule_reconnect()
+            sock.bind(("0.0.0.0", int(local_port)))
+        except OSError:
+            sock.close()
+            return None
 
-    def _schedule_reconnect(self) -> None:
-        if self._closing:
-            return
-        if self._reconnect_task and not self._reconnect_task.done():
-            return
-        self._reconnect_task = asyncio.create_task(self._reconnect_later())
+        transaction_id = secrets.token_bytes(12)
+        msg_type = 0x0001
+        msg_length = 0
+        magic_cookie = 0x2112A442
+        req = struct.pack(">HHI12s", msg_type, msg_length, magic_cookie, transaction_id)
 
-    async def _reconnect_later(self):
-        if self._closing:
-            return
+        loop = asyncio.get_running_loop()
         try:
-            await asyncio.sleep(self._backoff)
-        except asyncio.CancelledError:
-            return
-        if self._closing:
-            return
-        self._backoff = min(self._backoff * 2, self._max_backoff)
-        await self.connect()
+            await loop.sock_sendto(sock, req, (self.stun_host, self.stun_port))
+            data, _ = await asyncio.wait_for(loop.sock_recvfrom(sock, 2048), timeout=max(0.2, self.timeout_s))
+        except Exception:
+            sock.close()
+            return None
 
-    async def close(self) -> None:
-        self._closing = True
-        if self._reconnect_task and not self._reconnect_task.done():
-            self._reconnect_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._reconnect_task
-        self._reconnect_task = None
-        if self.writer:
-            self.writer.close()
-            with contextlib.suppress(Exception):
-                await self.writer.wait_closed()
-        self.reader = None
-        self.writer = None
+        sock.close()
+        if len(data) < 20:
+            return None
 
-    async def send(self, msg: dict[str, Any]):
-        if self.writer:
-            ok = await write_message(self.writer, {"type": "relay", "to": msg.get("to"), "body": msg})
-            if not ok:
-                self._schedule_reconnect()
+        body = data[20:]
+        i = 0
+        while i + 4 <= len(body):
+            attr_type = struct.unpack(">H", body[i : i + 2])[0]
+            attr_len = struct.unpack(">H", body[i + 2 : i + 4])[0]
+            val_start = i + 4
+            val_end = val_start + attr_len
+            if val_end > len(body):
+                break
+            value = body[val_start:val_end]
+
+            if attr_type == 0x0020 and attr_len >= 8:
+                family = value[1]
+                if family == 0x01:
+                    xport = struct.unpack(">H", value[2:4])[0]
+                    port = xport ^ (magic_cookie >> 16)
+                    cookie_bytes = struct.pack(">I", magic_cookie)
+                    ip_raw = bytes([value[4 + j] ^ cookie_bytes[j] for j in range(4)])
+                    return socket.inet_ntoa(ip_raw), int(port)
+
+            if attr_type == 0x0001 and attr_len >= 8:
+                family = value[1]
+                if family == 0x01:
+                    port = struct.unpack(">H", value[2:4])[0]
+                    return socket.inet_ntoa(value[4:8]), int(port)
+
+            i = val_end + ((4 - (attr_len % 4)) % 4)
+
+        return None
+
+    async def discover_public_endpoint(self) -> tuple[str, int] | None:
+        if self.direct_peer.udp_port is None:
+            return None
+        return await self._stun_discover(self.direct_peer.udp_port)
+
+    async def punch(self, target_peer_id: str, target_ip: str, target_udp_port: int) -> Connection | None:
+        if not self.direct_peer.udp_port:
+            return None
+
+        my_public = await self._stun_discover(self.direct_peer.udp_port)
+        if not my_public:
+            return None
+
+        probe = {
+            "kind": "p2p-probe",
+            "from_id": getattr(self.hermes, "peer_id", "unknown"),
+            "ts": time.time(),
+            "public_ip": my_public[0],
+            "public_port": my_public[1],
+        }
+        for _ in range(4):
+            await self.direct_peer.send_udp(target_ip, int(target_udp_port), probe)
+            await asyncio.sleep(0.08)
+
+        return Connection(peer_id=target_peer_id, kind="udp", ip=target_ip, port=int(target_udp_port))
 
 
 class TransportManager:
-    """Coordinates all transport strategies."""
-
-    def __init__(self, config: Any, identity: Any):
+    def __init__(self, config, identity):
         self.config = config
         self.identity = identity
+        self.fb = FirebaseTransport(config, identity)
+        self._on_message = None
+
         self.direct_peer = DirectPeer()
-        self.hermes = HermesClient(config.hermes_host, config.hermes_port, identity.peer_id)
-        self.cloud = FirebaseCloudQueueClient(config, identity)
-        self.holepuncher = HolePuncher(self.direct_peer, self.hermes, config.stun_host, config.stun_port, config.holepunch_timeout_s)
-        self.connections: dict[str, Connection] = {}
-        self.status: dict[str, Any] = {
+        self.hermes = HermesClient(
+            getattr(config, "hermes_host", "127.0.0.1"),
+            getattr(config, "hermes_port", 7777),
+            getattr(identity, "peer_id", "unknown"),
+        )
+        self.holepuncher = HolePuncher(
+            self.direct_peer,
+            self.hermes,
+            getattr(config, "stun_host", "stun.l.google.com"),
+            int(getattr(config, "stun_port", 19302)),
+            int(getattr(config, "holepunch_timeout_s", 5)),
+        )
+
+        self.status = {
+            "connected": True,
+            "ip": None,
+            "port": None,
             "direct_port": None,
             "udp_port": None,
-            "hermes_connected": False,
             "last_transport": None,
-            "last_error": None,
+            "hermes_connected": False,
         }
 
-    def set_on_message(self, callback: Callable[[dict], None]) -> None:
+    def set_on_message(self, callback):
+        self._on_message = callback
         self.direct_peer.on_message = callback
-        self.hermes.on_message = callback
 
-    async def initialize(self):
-        """Start listening and connect to Hermes."""
-        port = await self.direct_peer.listen(port=0)
-        self.status["direct_port"] = port
+    async def initialize(self, listen_port: int | None = None) -> bool:
+        self.status["direct_port"] = await self.direct_peer.listen_tcp(listen_port or 0)
+        self.status["port"] = self.status["direct_port"]
         self.status["udp_port"] = await self.direct_peer.listen_udp(0)
-        print(f"Listening on local port {port}")
-        await self.hermes.connect()
-        self.status["hermes_connected"] = self.hermes.writer is not None
 
-    async def connect(self, peer_id: str, hint_host: str | None = None, hint_port: int | None = None) -> Connection:
-        mode = self.config.transport_mode
-        self.status["last_error"] = None
+        try:
+            with urllib.request.urlopen("https://api.ipify.org", timeout=5) as resp:
+                self.status["ip"] = resp.read().decode("utf-8")
+        except Exception:
+            self.status["ip"] = "127.0.0.1"
 
-        if mode == "all_relay":
-            conn = Connection(peer_id=peer_id, kind="relay")
-            self.connections[peer_id] = conn
-            self.status["last_transport"] = "relay"
-            return conn
+        try:
+            await self.hermes.connect()
+            self.status["hermes_connected"] = bool(self.hermes.writer)
+        except Exception:
+            self.status["hermes_connected"] = False
 
-        if mode in ("direct_only", "fallback", "all_p2p") and hint_host and hint_port:
-            conn = await self.direct_peer.connect(hint_host, hint_port, self.config.direct_timeout_s)
-            if conn:
-                conn.peer_id = peer_id
-                self.connections[peer_id] = conn
-                self.status["last_transport"] = "direct"
-                return conn
+        return True
 
-        if mode in ("fallback", "all_p2p"):
-            conn = await self.holepuncher.punch(peer_id, hint_host, hint_port)
-            if conn:
-                self.connections[peer_id] = conn
-                self.status["last_transport"] = "holepunch"
-                return conn
+    def update_presence(self):
+        if not self.status.get("ip") or not self.status.get("direct_port"):
+            return
 
-        if mode == "fallback":
-            conn = Connection(peer_id=peer_id, kind="relay")
-            self.connections[peer_id] = conn
-            self.status["last_transport"] = "relay"
-            return conn
+        stun_ep = None
+        self.fb.update_presence(
+            self.status["ip"],
+            int(self.status["direct_port"]),
+            udp_port=self.status.get("udp_port"),
+            stun_ip=(stun_ep[0] if stun_ep else None),
+            stun_port=(stun_ep[1] if stun_ep else None),
+        )
 
-        raise RuntimeError(f"Cannot connect to {peer_id} with mode {mode}")
+    async def authenticate(self, u, p):
+        return await self.fb.authenticate(u, p)
 
-    async def send(self, connection: Connection | None, msg: dict):
-        """Send a message via the connection."""
-        if connection and connection.writer:
-            ok = await write_message(connection.writer, msg)
-            if not ok:
-                self.status["last_error"] = "direct send failed"
-                await self.hermes.send(msg)
-                self.status["last_transport"] = "relay"
-        elif connection and connection.kind == "holepunch" and connection.udp_socket and connection.udp_peer:
-            host, port = connection.udp_peer
-            ok = await self.direct_peer.udp_send(msg, host, port)
-            if not ok:
-                self.status["last_error"] = "udp send failed"
-                if self.config.cloud.enabled:
-                    ok = await self.cloud.enqueue(msg)
-                    if not ok:
-                        await self.hermes.send(msg)
-                else:
-                    await self.hermes.send(msg)
-                self.status["last_transport"] = "relay"
-            else:
-                self.status["last_transport"] = "holepunch"
-        else:
-            if self.config.cloud.enabled:
-                ok = await self.cloud.enqueue(msg)
-                if not ok:
-                    await self.hermes.send(msg)
-                    self.status["last_transport"] = "relay"
-                else:
-                    self.status["last_transport"] = "cloud"
-            else:
-                await self.hermes.send(msg)
-                self.status["last_transport"] = "relay"
+    async def join_channel(self, name, password=None) -> dict:
+        res = await self.fb.join_room(name, password)
+        if res.get("ok"):
+            history = await self.fb.fetch_history(res["path"], limit=10)
+            for m in history:
+                if self._on_message:
+                    self._on_message(m)
+            self.fb.listen(res["path"], self._on_message)
+        return res
 
-    async def broadcast(self, msg: dict):
-        """Broadcast via Hermes or cloud queue when enabled."""
-        if self.config.cloud.enabled:
-            ok = await self.cloud.enqueue(msg)
-            if not ok:
-                await self.hermes.send(msg)
-                self.status["last_transport"] = "relay"
-            else:
-                self.status["last_transport"] = "cloud"
-        else:
-            await self.hermes.send(msg)
-            self.status["last_transport"] = "relay"
+    async def load_more(self, channel, limit=50):
+        safe_target = channel.replace("@", "chan_").replace("*", "broadcast")
+        if safe_target == "broadcast":
+            safe_target = "broadcast"
+        path = f"messages/{safe_target}"
+        history = await self.fb.fetch_history(path, limit=limit)
+        for m in history:
+            if self._on_message:
+                self._on_message(m)
 
-    async def join_channel(self, name: str):
-        """Join a channel on Hermes."""
-        if self.hermes.writer:
-            await write_message(self.hermes.writer, {"type": "join", "channel": name})
+    async def load_new_messages(self, channel, limit=100):
+        safe_target = channel.replace("@", "chan_").replace("*", "broadcast")
+        if safe_target == "broadcast":
+            safe_target = "broadcast"
+        path = f"messages/{safe_target}"
+        history = await self.fb.fetch_new(path, limit=limit)
+        for m in history:
+            if self._on_message:
+                self._on_message(m)
+        return len(history)
 
-    async def leave_channel(self, name: str):
-        """Leave a channel on Hermes."""
-        if self.hermes.writer:
-            await write_message(self.hermes.writer, {"type": "leave", "channel": name})
+    async def set_listen_port(self, port: int) -> int:
+        self.status["direct_port"] = await self.direct_peer.listen_tcp(port)
+        self.status["port"] = self.status["direct_port"]
+        self.update_presence()
+        return int(self.status["direct_port"])
+
+    async def _send_via_firebase(self, target_id: str, msg: dict) -> bool:
+        safe_target = target_id.replace("@", "chan_").replace("*", "broadcast")
+        if safe_target == "broadcast":
+            safe_target = "broadcast"
+        path = f"messages/{safe_target}"
+        ok = await self.fb.send(path, msg)
+        if ok:
+            self.status["last_transport"] = "firebase"
+        return ok
+
+    async def _send_direct_tcp(self, presence: dict, msg: dict) -> bool:
+        ip = presence.get("ip")
+        port = presence.get("port")
+        if not ip or not port:
+            return False
+        ok = await self.direct_peer.send_tcp(str(ip), int(port), msg, timeout_s=float(getattr(self.config, "direct_timeout_s", 3)))
+        if ok:
+            self.status["last_transport"] = "direct_tcp"
+        return ok
+
+    async def _send_direct_udp(self, target_id: str, presence: dict, msg: dict) -> bool:
+        udp_port = presence.get("udp_port") or presence.get("stun_port")
+        ip = presence.get("stun_ip") or presence.get("ip")
+        if not ip or not udp_port:
+            return False
+
+        conn = await self.holepuncher.punch(target_id, str(ip), int(udp_port))
+        if not conn:
+            return False
+
+        wrapped = {"kind": "p2p-msg", "msg": msg}
+        ok = await self.direct_peer.send_udp(conn.ip or str(ip), int(conn.port or udp_port), wrapped)
+        if ok:
+            self.status["last_transport"] = "udp_holepunch"
+        return ok
+
+    async def connect(self, target_id: str) -> Connection:
+        presence = self.fb.get_peer_presence(target_id)
+        if isinstance(presence, dict):
+            if await self._send_direct_tcp(presence, {"type": "ping", "from_id": self.identity.peer_id, "ts": time.time()}):
+                return Connection(peer_id=target_id, kind="direct", ip=presence.get("ip"), port=presence.get("port"))
+            if await self._send_direct_udp(target_id, presence, {"type": "ping", "from_id": self.identity.peer_id, "ts": time.time()}):
+                return Connection(peer_id=target_id, kind="udp", ip=presence.get("ip"), port=presence.get("udp_port"))
+        self.status["last_transport"] = "relay"
+        return Connection(peer_id=target_id, kind="relay")
+
+    async def send(self, target_id, msg) -> bool:
+        if not isinstance(target_id, str) or target_id.startswith("@") or target_id == "*":
+            return await self._send_via_firebase(str(target_id), msg)
+
+        presence = self.fb.get_peer_presence(target_id)
+        if isinstance(presence, dict):
+            if await self._send_direct_tcp(presence, msg):
+                return True
+            if await self._send_direct_udp(target_id, presence, msg):
+                return True
+
+        return await self._send_via_firebase(target_id, msg)
+
+    async def broadcast(self, msg) -> bool:
+        ok = await self.fb.send("messages/broadcast", msg)
+        if ok:
+            self.status["last_transport"] = "firebase"
+        return ok
+
+    async def send_raw(self, host: str, port: int, text: str) -> bool:
+        try:
+            _, writer = await asyncio.open_connection(host, int(port))
+            writer.write((text + "\n").encode("utf-8"))
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+            return True
+        except Exception:
+            return False

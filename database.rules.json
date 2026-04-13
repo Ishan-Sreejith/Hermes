@@ -1,6 +1,43 @@
 {
   "rules": {
-    ".read": true,
-    ".write": true
+    ".read": false,
+    ".write": false,
+    "presence": {
+      ".read": true,
+      ".indexOn": [
+        "updatedAt"
+      ],
+      "$uid": {
+        ".read": "data.child('public').val() === true || auth != null",
+        ".write": "auth != null ? $uid === auth.uid : $uid === newData.child('id').val()",
+        ".validate": "newData.hasChildren(['id','name','online','public','updatedAt']) && newData.child('id').isString() && newData.child('name').isString() && newData.child('name').val().length <= 64 && newData.child('online').isBoolean() && newData.child('public').isBoolean()"
+      }
+    },
+    "users": {
+      "$username": {
+        ".read": true,
+        ".write": "!data.exists() || data.child('peer_id').val() === newData.child('peer_id').val()",
+        ".validate": "newData.hasChildren(['password','peer_id']) && newData.child('password').isString() && newData.child('peer_id').isString()"
+      }
+    },
+    "rooms": {
+      "$room": {
+        ".read": true,
+        ".write": "!data.exists()"
+      }
+    },
+    "messages": {
+      "$chatKey": {
+        ".read": true,
+        ".indexOn": [
+          "ts"
+        ],
+        "$msgId": {
+          ".read": true,
+          ".write": "auth != null ? newData.child('fromId').val() === auth.uid : newData.child('fromId').isString()",
+          ".validate": "newData.hasChildren(['id','fromId','fromName','to','scope','text','enc','ts','v','source']) && newData.child('id').isString() && newData.child('id').val().length <= 120 && newData.child('fromId').isString() && newData.child('fromName').isString() && newData.child('fromName').val().length <= 64 && newData.child('to').isString() && newData.child('scope').isString() && newData.child('text').isString() && newData.child('text').val().length <= 4000 && newData.child('enc').isString() && newData.child('ts').isNumber() && newData.child('v').isNumber() && newData.child('source').isString()"
+        }
+      }
+    }
   }
 }

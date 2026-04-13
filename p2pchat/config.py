@@ -32,12 +32,14 @@ class CloudConfig:
     service_account_json: str | None = None
     hosting_enabled: bool = False
     hosting_site: str | None = None
+    api_key: str | None = None
+    app_id: str | None = None
 
 
 @dataclass
 class Config:
-    transport_mode: str = "fallback"
-    fallback_order: list[str] = field(default_factory=lambda: ["direct", "holepunch", "hermes"])
+    transport_mode: str = "firebase"
+    fallback_order: list[str] = field(default_factory=lambda: ["firebase", "direct", "holepunch"])
     direct_timeout_s: int = 3
     holepunch_timeout_s: int = 5
     hermes_host: str = "127.0.0.1"
@@ -57,20 +59,23 @@ class ConfigManager:
 
     def load(self) -> Config:
         if self.path.exists():
-            raw = json.loads(self.path.read_text())
-            return Config(
-                transport_mode=raw.get("transport_mode", "fallback"),
-                fallback_order=raw.get("fallback_order", ["direct", "holepunch", "hermes"]),
-                direct_timeout_s=raw.get("direct_timeout_s", 3),
-                holepunch_timeout_s=raw.get("holepunch_timeout_s", 5),
-                hermes_host=raw.get("hermes_host", "127.0.0.1"),
-                hermes_port=raw.get("hermes_port", 7777),
-                stun_host=raw.get("stun_host", "stun.l.google.com"),
-                stun_port=raw.get("stun_port", 19302),
-                crypto=CryptoConfig(**raw.get("crypto", {})),
-                ui=UIConfig(**raw.get("ui", {})),
-                cloud=CloudConfig(**raw.get("cloud", {})),
-            )
+            try:
+                raw = json.loads(self.path.read_text())
+                return Config(
+                    transport_mode=raw.get("transport_mode", "firebase"),
+                    fallback_order=raw.get("fallback_order", ["firebase", "direct", "holepunch"]),
+                    direct_timeout_s=raw.get("direct_timeout_s", 3),
+                    holepunch_timeout_s=raw.get("holepunch_timeout_s", 5),
+                    hermes_host=raw.get("hermes_host", "127.0.0.1"),
+                    hermes_port=raw.get("hermes_port", 7777),
+                    stun_host=raw.get("stun_host", "stun.l.google.com"),
+                    stun_port=raw.get("stun_port", 19302),
+                    crypto=CryptoConfig(**raw.get("crypto", {})),
+                    ui=UIConfig(**raw.get("ui", {})),
+                    cloud=CloudConfig(**raw.get("cloud", {})),
+                )
+            except Exception:
+                pass
         config = Config()
         self.save(config)
         return config

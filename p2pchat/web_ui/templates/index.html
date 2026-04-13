@@ -1,155 +1,219 @@
 <!doctype html>
-<html>
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>P2PChat</title>
+    <title>Hermes Web Terminal</title>
     <style>
-      * {
-        margin: 0;
-        padding: 0;
-        box-sizing: border-box;
+      :root {
+        --bg: #05070b;
+        --panel: #0b0f17;
+        --line: #182234;
+        --text: #d7e2ff;
+        --muted: #7e93bf;
+        --ok: #62d196;
+        --warn: #f2c14e;
+        --err: #ff6b6b;
+        --accent: #6ea8fe;
       }
+      * { box-sizing: border-box; }
       body {
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-        background: #f5f5f5;
-        display: flex;
-        height: 100vh;
-      }
-      #app {
-        display: flex;
-        width: 100%;
-        flex-direction: column;
-      }
-      header {
-        background: #2c3e50;
-        color: white;
-        padding: 1rem;
-        text-align: center;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-      }
-      h1 {
-        font-size: 1.5rem;
         margin: 0;
-      }
-      .status {
-        font-size: 0.85rem;
-        opacity: 0.8;
-        margin-top: 0.5rem;
-      }
-      .container {
-        display: flex;
-        flex: 1;
+        background: radial-gradient(circle at 80% -20%, #1f2d4d 0%, transparent 45%), var(--bg);
+        color: var(--text);
+        font-family: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+        height: 100vh;
         overflow: hidden;
       }
-      #sidebar {
-        width: 200px;
-        background: #ecf0f1;
-        border-right: 1px solid #bdc3c7;
-        padding: 1rem;
-        overflow-y: auto;
+      .layout {
+        display: grid;
+        grid-template-columns: 1fr 320px;
+        height: 100vh;
       }
-      .channel-group {
-        margin-bottom: 1.5rem;
+      .terminal {
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        border-right: 1px solid var(--line);
       }
-      .channel-group h3 {
-        font-size: 0.85rem;
-        text-transform: uppercase;
-        color: #7f8c8d;
-        margin-bottom: 0.5rem;
-      }
-      .channel-item {
-        padding: 0.5rem;
-        margin-bottom: 0.25rem;
-        background: white;
-        border-radius: 4px;
-        cursor: pointer;
-        font-size: 0.9rem;
-        transition: background 0.2s;
-      }
-      .channel-item:hover {
-        background: #d5dbdb;
-      }
-      .main-chat {
+      .topbar {
+        background: rgba(11, 15, 23, 0.95);
+        border-bottom: 1px solid var(--line);
+        padding: 10px 14px;
         display: flex;
-        flex-direction: column;
-        flex: 1;
+        justify-content: space-between;
+        gap: 12px;
+        font-size: 12px;
       }
-      #messages {
-        flex: 1;
-        padding: 1rem;
-        overflow-y: auto;
-        background: white;
+      .statusline {
+        color: var(--muted);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
-      #messages div {
-        margin-bottom: 0.75rem;
-        padding: 0.5rem;
-        background: #f8f9fa;
-        border-radius: 4px;
-        border-left: 3px solid #3498db;
+      #output {
+        padding: 12px 14px;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+        line-height: 1.45;
+        font-size: 13px;
       }
-      #messages span {
-        display: inline;
+      .line { margin: 0 0 3px 0; }
+      .sys { color: var(--muted); }
+      .ok { color: var(--ok); }
+      .warn { color: var(--warn); }
+      .err { color: var(--err); }
+      .msg { color: var(--text); }
+      .me { color: #b7d4ff; }
+      .prompt {
+        border-top: 1px solid var(--line);
+        padding: 8px 12px;
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 8px;
+        align-items: center;
+        background: var(--panel);
       }
-      #messages strong {
-        color: #2c3e50;
-        margin-right: 0.5rem;
-      }
-      .input-area {
-        background: #ecf0f1;
-        padding: 1rem;
-        border-top: 1px solid #bdc3c7;
-        display: flex;
-        gap: 0.5rem;
-      }
-      #input {
-        flex: 1;
-        padding: 0.75rem;
-        border: 1px solid #bdc3c7;
-        border-radius: 4px;
-        font-size: 0.95rem;
-      }
-      #send {
-        padding: 0.75rem 1.5rem;
-        background: #3498db;
-        color: white;
+      #prompt-label { color: var(--accent); font-size: 12px; }
+      #cmd {
+        width: 100%;
         border: none;
-        border-radius: 4px;
+        background: transparent;
+        color: var(--text);
+        font: inherit;
+        font-size: 13px;
+        outline: none;
+      }
+      .sidebar {
+        background: rgba(11, 15, 23, 0.86);
+        display: grid;
+        grid-template-rows: auto auto 1fr 1fr;
+        gap: 10px;
+        padding: 10px;
+      }
+      .card {
+        border: 1px solid var(--line);
+        background: rgba(5, 9, 16, 0.65);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      .card h3 {
+        margin: 0;
+        padding: 8px 10px;
+        font-size: 11px;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+        border-bottom: 1px solid var(--line);
+        color: var(--muted);
+      }
+      .card-body { padding: 8px 10px; font-size: 12px; }
+      .list { list-style: none; margin: 0; padding: 0; max-height: 100%; overflow: auto; }
+      .list li { padding: 6px 2px; border-bottom: 1px dashed rgba(126,147,191,0.15); cursor: pointer; }
+      .list li:hover { color: var(--accent); }
+
+      #menu-overlay {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(2, 4, 8, 0.82);
+        z-index: 20;
+      }
+      .menu-box {
+        width: min(520px, 92vw);
+        border: 1px solid var(--line);
+        background: var(--panel);
+        border-radius: 10px;
+        padding: 18px;
+      }
+      .menu-box h2 { margin: 0 0 12px; font-size: 16px; }
+      .menu-grid { display: grid; gap: 10px; }
+      .menu-row { display: grid; grid-template-columns: 120px 1fr auto; gap: 8px; align-items: center; }
+      .menu-row input {
+        background: #09111d;
+        border: 1px solid var(--line);
+        color: var(--text);
+        border-radius: 6px;
+        padding: 8px;
+        font: inherit;
+      }
+      .menu-row button {
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #0f1a2d;
+        color: var(--text);
+        padding: 8px 10px;
         cursor: pointer;
-        font-weight: 600;
-        transition: background 0.2s;
       }
-      #send:hover:not(:disabled) {
-        background: #2980b9;
-      }
-      #send:disabled {
-        background: #95a5a6;
-        cursor: not-allowed;
+      @media (max-width: 960px) {
+        .layout { grid-template-columns: 1fr; }
+        .sidebar { display: none; }
       }
     </style>
   </head>
   <body>
-    <div id="app">
-      <header>
-        <h1>P2PChat</h1>
-        <div class="status" id="status">Connecting...</div>
-        <div style="margin-top:0.5rem;">
-          <b>Channel:</b> <span id="current-channel">#broadcast</span>
-          &nbsp;|&nbsp;
-          <b>Encryption:</b> <span id="enc-mode">none</span>
-        </div>
-      </header>
-      <div class="container">
-        <div id="sidebar"></div>
-        <div class="main-chat">
-          <div id="messages"></div>
-          <div class="input-area">
-            <input id="input" placeholder="Type a message..." />
-            <button id="send">Send</button>
+    <div id="menu-overlay">
+      <div class="menu-box">
+        <h2>Hermes Web Terminal</h2>
+        <div class="menu-grid">
+          <div class="menu-row">
+            <label>Username</label>
+            <input id="menu-name" placeholder="web-user" />
+            <button id="menu-save-name">Set</button>
+          </div>
+          <div class="menu-row">
+            <label>Open</label>
+            <input id="menu-open-target" value="@broadcast" />
+            <button id="menu-open">Enter</button>
+          </div>
+          <div class="menu-row">
+            <label>Join Channel</label>
+            <input id="menu-join" placeholder="@dev" />
+            <button id="menu-join-btn">Join</button>
+          </div>
+          <div class="menu-row">
+            <label>Direct Chat</label>
+            <input id="menu-connect" placeholder="peer-id" />
+            <button id="menu-connect-btn">Connect</button>
           </div>
         </div>
       </div>
     </div>
-    <script src="/static/app.js"></script>
+
+    <div class="layout">
+      <section class="terminal">
+        <div class="topbar">
+          <div class="statusline" id="status-left">booting...</div>
+          <div class="statusline" id="status-right">firebase-only web transport</div>
+        </div>
+        <div id="output"></div>
+        <div class="prompt">
+          <div id="prompt-label">@broadcast ›</div>
+          <input id="cmd" autocomplete="off" spellcheck="false" placeholder="Type a message or /help" />
+        </div>
+      </section>
+
+      <aside class="sidebar">
+        <div class="card">
+          <h3>Session</h3>
+          <div class="card-body" id="session-card"></div>
+        </div>
+        <div class="card">
+          <h3>Commands</h3>
+          <div class="card-body">/help /join /connect /load /status /whoami /enc /name /clear /menu</div>
+        </div>
+        <div class="card">
+          <h3>Chats</h3>
+          <ul class="list" id="chat-list"></ul>
+        </div>
+        <div class="card">
+          <h3>Peers</h3>
+          <ul class="list" id="peer-list"></ul>
+        </div>
+      </aside>
+    </div>
+
+    <script type="module" src="/static/app.js"></script>
   </body>
 </html>

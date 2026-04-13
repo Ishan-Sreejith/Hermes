@@ -1,57 +1,55 @@
 # Hermes
 
-Hermes is a terminal-first chat app with a relay server, direct P2P support, a simple web UI, and optional Firebase fallback.
+Hermes is a terminal-first chat app with a local relay server, direct peer messaging, and a Firebase-backed web terminal.
 
-## What it does
+## Features
 
-- Menu-first terminal client launched with `hermes`
-- Direct TCP, UDP hole punching, relay fallback, and Firebase queue fallback
+- Terminal client with a startup menu
+- Direct TCP messaging and UDP hole punching
+- Firebase fallback transport
+- Browser terminal UI that uses Firebase only
 - RSA, Fernet, and plugin-based encryption
-- Local web UI for testing and browser-based chat
-- Peer discovery on the local network
-- Config, identity, and key storage under `~/.p2pchat`
+- Local config and identity storage in `~/.p2pchat`
 
 ## Requirements
 
 - Python 3.10+
 - `cryptography`
 - `flask`
-- Optional: `firebase-admin` for Firebase support
+- Optional: Firebase project for cloud mode
 
 ## Install
 
 ```bash
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 pip install -e '.[firebase]'
 ```
 
-## Run locally
+## Run
 
-Start the relay server:
+Start relay server:
 
 ```bash
 hermes-server --port 7777
 ```
 
-Start the web UI:
+Start web UI:
 
 ```bash
-web-ui --hermes localhost:7777 --port 8080
+web-ui --port 8080
 ```
 
-Start the client:
+Start terminal client:
 
 ```bash
-hermes --username alice
+hermes
 ```
 
-The client opens a menu first. Use the menu for recent chats, new contacts, channel joins, settings, and status. Advanced slash commands are still available.
+## Firebase setup
 
-## Firebase
-
-If you want Firebase queue fallback, set these values in `~/.p2pchat/config.json`:
+Set Firebase values in `~/.p2pchat/config.json`:
 
 ```json
 {
@@ -62,49 +60,29 @@ If you want Firebase queue fallback, set these values in `~/.p2pchat/config.json
     "database_url": "https://your-project-id-default-rtdb.firebaseio.com",
     "queue_path": "messages",
     "delivery_ttl_s": 300,
-    "credentials_path": "/path/to/serviceAccountKey.json",
-    "hosting_enabled": true,
-    "hosting_site": "your-web-app"
-  },
-  "ui": {
-    "hosted_web_ui_url": "https://your-web-app.web.app"
+    "credentials_path": "/path/to/serviceAccountKey.json"
   }
 }
 ```
 
-For hosting the web UI on Firebase Hosting, copy the static files from `p2pchat/web_ui/templates/index.html` and `p2pchat/web_ui/static/app.js` into your Hosting public directory, then deploy with Firebase CLI.
-
-## Web UI
-
-The browser UI shows:
-
-- current transport state
-- direct and UDP ports
-- Firebase on/off status
-- message list with encryption badges
-- channel and peer shortcuts
-
-Useful endpoints while developing:
-
-- `GET /firebase-config`
-- `GET /firebase-hosting`
-- `GET /status`
+For static hosting, deploy `public/` and provide runtime config in your own environment.
 
 ## Project layout
 
-- `p2pchat/main.py` — terminal client
-- `p2pchat/transport.py` — direct, UDP, relay, and cloud transport
-- `p2pchat/crypto.py` — encryption and plugins
-- `p2pchat/engine.py` — chat logic
-- `p2pchat/hermes_server.py` — relay server
-- `p2pchat/web_ui/` — local browser UI
-- `tests/` — automated tests
+- `p2pchat/main.py`: terminal entrypoint
+- `p2pchat/transport.py`: transport logic
+- `p2pchat/engine.py`: chat engine
+- `p2pchat/crypto.py`: crypto and plugins
+- `p2pchat/hermes_server.py`: relay server
+- `p2pchat/web_ui/`: Flask and browser terminal files
+- `public/`: static hosted web terminal files
+- `tests/`: automated tests
 
 ## Notes
 
-- Hermes relay is the easiest way to test locally.
-- Hole punching needs a real network test to confirm it across NATs.
-- Firebase needs a project, a database, and service account credentials.
+- Web UI is Firebase-only by design.
+- Terminal can use direct transports first and fallback when needed.
+- Firebase credentials should not be committed to git.
 
 ## License
 

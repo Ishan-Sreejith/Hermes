@@ -25,9 +25,9 @@ client_peer_id = "web-ui-observer"
 config_dir = Path.home() / ".p2pchat"
 config_mgr = ConfigManager(config_dir)
 transport_status = {
-    "connected": False,
-    "transport_mode": "relay",
-    "last_transport": None,
+    "connected": True,
+    "transport_mode": "firebase-web",
+    "last_transport": "firebase",
     "last_error": None,
     "direct_port": None,
     "udp_port": None,
@@ -37,7 +37,7 @@ transport_status = {
 
 def _current_config() -> dict:
     cfg = config_mgr.load()
-    transport_status["transport_mode"] = cfg.transport_mode
+    transport_status["transport_mode"] = "firebase-web"
     transport_status["firebase_enabled"] = cfg.cloud.enabled
     return {
         "transport_mode": cfg.transport_mode,
@@ -59,6 +59,13 @@ def _current_config() -> dict:
         "ui": {
             "hosted_web_ui_url": cfg.ui.hosted_web_ui_url,
             "compact_tui": cfg.ui.compact_tui,
+        },
+        "firebase_web": {
+            "apiKey": cfg.cloud.api_key,
+            "databaseURL": cfg.cloud.database_url,
+            "projectId": cfg.cloud.project_id,
+            "authDomain": cfg.cloud.project_id and f"{cfg.cloud.project_id}.firebaseapp.com",
+            "appId": cfg.cloud.app_id,
         },
         "transport": transport_status,
     }
@@ -105,7 +112,8 @@ async def connect_hermes():
             {
                 "type": "register",
                 "peer_id": client_peer_id,
-                "channels": ["#broadcast", "#test"],
+                # Aligning with @ prefix for groups/channels
+                "channels": ["@broadcast", "@dev"],
             },
         )
         transport_status["connected"] = True
@@ -148,13 +156,19 @@ def send():
     if not body:
         return jsonify({"ok": False, "error": "empty message"}), 400
 
+    to_target = str(payload.get("to") or "*")
+    # Ensure targets starting with @ are handled correctly
+    channel = payload.get("channel")
+    if to_target.startswith("@"):
+        channel = to_target
+
     msg = {
         "type": "msg",
         "body": body,
         "from_id": client_peer_id,
         "from_name": "web-ui",
-        "to": str(payload.get("to") or "*"),
-        "channel": payload.get("channel"),
+        "to": to_target,
+        "channel": channel,
         "ts": float(payload.get("ts") or time.time()),
         "enc": str(payload.get("enc") or "none"),
     }
@@ -208,13 +222,18 @@ def firebase_hosting():
         {
             "hosting_enabled": cfg["cloud"]["hosting_enabled"],
             "hosting_site": cfg["cloud"]["hosting_site"],
-            "static_assets": ["/", "/static/app.js", "/static/"],
+            "static_assets": ["/", "/app.js", "/static/"],
             "deployment_hint": "Serve the static web UI from Firebase Hosting and keep Flask for local polling only.",
             "transport_mode": cfg["transport_mode"],
             "stun_host": cfg["stun_host"],
             "stun_port": cfg["stun_port"],
         }
     )
+
+
+@app.get("/web-config")
+def web_config():
+    return jsonify(_current_config())
 
 
 def run_asyncio_loop(loop_obj: asyncio.AbstractEventLoop):
@@ -247,7 +266,7 @@ def main():
     loop_thread = threading.Thread(target=run_asyncio_loop, args=(event_loop,), daemon=True)
     loop_thread.start()
 
-    asyncio.run_coroutine_threadsafe(connect_hermes(), event_loop)
+    # Web terminal mode is Firebase-only; no Hermes socket bootstrap.
 
     app.run(host="127.0.0.1", port=args.port, debug=False, threaded=True)
 

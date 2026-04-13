@@ -1,251 +1,467 @@
-const input = document.getElementById('input');
-const send = document.getElementById('send');
-const messages = document.getElementById('messages');
-const status = document.getElementById('status');
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.4.0/firebase-app.js';
+import {
+  getDatabase,
+  ref,
+  push,
+  set,
+  onChildAdded,
+  onValue,
+  onDisconnect,
+  serverTimestamp,
+  query,
+  orderByChild,
+  limitToLast,
+  get,
+} from 'https://www.gstatic.com/firebasejs/12.4.0/firebase-database.js';
+import { getAuth, signInAnonymously } from 'https://www.gstatic.com/firebasejs/12.4.0/firebase-auth.js';
 
-let lastTs = 0;
-let busy = false;
-let theme = localStorage.getItem('theme') || 'light';
-let encMode = localStorage.getItem('encMode') || 'none';
-let currentChannel = '#broadcast';
-let errorBox = null;
-let firebaseConfig = null;
-let transportState = null;
+const MAX_LINES = 1800;
 
-function clearMessages() {
-  if (messages) messages.innerHTML = '';
+const state = {
+  cfg: null,
+  app: null,
+  db: null,
+  auth: null,
+  userId: localStorage.getItem('hermesUserId') || null,
+  username: localStorage.getItem('hermesUsername') || '',
+  activeTarget: localStorage.getItem('hermesActiveTarget') || '@broadcast',
+  encMode: localStorage.getItem('hermesEncMode') || 'none',
+  autoLoad: true,
+  autoLoadLimit: 100,
+  connected: false,
+  peers: [],
+  chats: new Set(['@broadcast']),
+  currentPath: '',
+  unsubs: { messages: null, inbox: null, presence: null, connected: null },
+  seenKeys: new Set(),
+};
+
+const el = {
+  output: document.getElementById('output'),
+  cmd: document.getElementById('cmd'),
+  prompt: document.getElementById('prompt-label'),
+  statusLeft: document.getElementById('status-left'),
+  statusRight: document.getElementById('status-right'),
+  chatList: document.getElementById('chat-list'),
+  peerList: document.getElementById('peer-list'),
+  sessionCard: document.getElementById('session-card'),
+  menuOverlay: document.getElementById('menu-overlay'),
+  menuName: document.getElementById('menu-name'),
+  menuSaveName: document.getElementById('menu-save-name'),
+  menuOpenTarget: document.getElementById('menu-open-target'),
+  menuOpen: document.getElementById('menu-open'),
+  menuJoin: document.getElementById('menu-join'),
+  menuJoinBtn: document.getElementById('menu-join-btn'),
+  menuConnect: document.getElementById('menu-connect'),
+  menuConnectBtn: document.getElementById('menu-connect-btn'),
+};
+
+function nowSec() {
+  return Date.now() / 1000;
 }
 
-function formatTime(ts) {
-  if (!ts) return '';
-  const d = new Date(ts * 1000);
-  return d.toLocaleTimeString();
+function saveLocal() {
+  localStorage.setItem('hermesActiveTarget', state.activeTarget);
+  localStorage.setItem('hermesEncMode', state.encMode);
+  localStorage.setItem('hermesUsername', state.username);
+  if (state.userId) localStorage.setItem('hermesUserId', state.userId);
 }
 
-function getEncBadge(enc) {
-  const badges = {
-    'none': '📭',
-    'fernet': '🔑',
-    'rsa': '🔒',
-  };
-  if (enc && enc.startsWith('custom:')) {
-    return '⚙️';
-  }
-  return badges[enc] || '❓';
+function safeKey(value) {
+  return String(value || '').replace(/[.#$/\[\]]/g, '_');
 }
 
-function setTheme(newTheme) {
-  theme = newTheme;
-  document.body.style.background = theme === 'dark' ? '#222' : '#f5f5f5';
-  document.body.style.color = theme === 'dark' ? '#eee' : '#222';
-  localStorage.setItem('theme', theme);
+function fmtTs(tsSec) {
+  const d = new Date(Number(tsSec || nowSec()) * 1000);
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-function setEncMode(mode) {
-  encMode = mode;
-  localStorage.setItem('encMode', mode);
-  const node = document.getElementById('enc-mode');
-  if (node) node.textContent = mode;
+function toSeconds(tsRaw) {
+  const n = Number(tsRaw || 0);
+  if (!Number.isFinite(n) || n <= 0) return nowSec();
+  // Support ms and sec timestamps.
+  return n > 10_000_000_000 ? n / 1000 : n;
 }
 
-function showError(msg) {
-  if (!errorBox) {
-    errorBox = document.createElement('div');
-    errorBox.style.position = 'fixed';
-    errorBox.style.top = '10px';
-    errorBox.style.right = '10px';
-    errorBox.style.background = '#e74c3c';
-    errorBox.style.color = 'white';
-    errorBox.style.padding = '0.5rem 1rem';
-    errorBox.style.borderRadius = '4px';
-    errorBox.style.zIndex = 1000;
-    document.body.appendChild(errorBox);
-  }
-  errorBox.textContent = msg;
-  errorBox.style.display = 'block';
-  setTimeout(() => { errorBox.style.display = 'none'; }, 3000);
-}
-
-function selectChannel(name) {
-  currentChannel = name;
-  const node = document.getElementById('current-channel');
-  if (node) node.textContent = name;
-  clearMessages();
-  lastTs = 0;
-  refresh();
-}
-
-function renderSidebar(peers, channels) {
-  const sidebar = document.getElementById('sidebar');
-  if (!sidebar) return;
-  sidebar.innerHTML = '';
-  const chGroup = document.createElement('div');
-  chGroup.className = 'channel-group';
-  chGroup.innerHTML = '<h3>Channels</h3>';
-  for (const ch of channels) {
-    const item = document.createElement('div');
-    item.className = 'channel-item';
-    item.textContent = ch;
-    item.onclick = () => selectChannel(ch);
-    chGroup.appendChild(item);
-  }
-  sidebar.appendChild(chGroup);
-  const peerGroup = document.createElement('div');
-  peerGroup.className = 'channel-group';
-  peerGroup.innerHTML = '<h3>Direct</h3>';
-  for (const p of peers) {
-    const item = document.createElement('div');
-    item.className = 'channel-item';
-    item.textContent = p.name || p.peer_id;
-    item.onclick = () => selectChannel(p.peer_id);
-    peerGroup.appendChild(item);
-  }
-  sidebar.appendChild(peerGroup);
-  const info = document.createElement('div');
-  info.style.marginTop = '1.5rem';
-  info.innerHTML = [
-    `<div><b>Transport:</b> <span id="transport-mode">${transportState?.transport_mode || 'relay'}</span></div>`,
-    `<div><b>Direct:</b> <span id="direct-port">${transportState?.direct_port || '—'}</span></div>`,
-    `<div><b>UDP:</b> <span id="udp-port">${transportState?.udp_port || '—'}</span></div>`,
-    `<div><b>Firebase:</b> <span id="firebase-state">${firebaseConfig?.cloud?.enabled ? 'on' : 'off'}</span></div>`,
-  ].join('');
-  sidebar.appendChild(info);
-  const encDiv = document.createElement('div');
-  encDiv.style.marginTop = '1rem';
-  encDiv.innerHTML = '<b>Encryption:</b> <span id="enc-mode">' + encMode + '</span>';
-  ['none', 'fernet', 'rsa'].forEach(mode => {
-    const btn = document.createElement('button');
-    btn.textContent = mode;
-    btn.onclick = () => setEncMode(mode);
-    encDiv.appendChild(btn);
-  });
-  sidebar.appendChild(encDiv);
-  const themeBtn = document.createElement('button');
-  themeBtn.textContent = theme === 'dark' ? '🌙 Dark' : '☀️ Light';
-  themeBtn.onclick = () => {
-    setTheme(theme === 'dark' ? 'light' : 'dark');
-    themeBtn.textContent = theme === 'dark' ? '🌙 Dark' : '☀️ Light';
-  };
-  sidebar.appendChild(themeBtn);
-}
-
-async function fetchPeersAndChannels() {
-  try {
-    const peersRes = await fetch('/peers');
-    const peers = peersRes.ok ? await peersRes.json() : [];
-    const channels = ['#broadcast', '#test'];
-    renderSidebar(peers, channels);
-  } catch {}
-}
-
-async function fetchFirebaseConfig() {
-  try {
-    const res = await fetch('/firebase-config');
-    if (!res.ok) return;
-    firebaseConfig = await res.json();
-    const host = document.getElementById('hosting-state');
-    if (host) {
-      host.textContent = firebaseConfig.cloud.hosting_enabled ? `Firebase Hosting: ${firebaseConfig.cloud.hosting_site || 'enabled'}` : 'Firebase Hosting: disabled';
-    }
-  } catch {}
-}
-
-async function fetchTransportStatus() {
-  try {
-    const res = await fetch('/status');
-    if (!res.ok) return;
-    transportState = await res.json();
-    if (status) {
-      const mode = transportState.connected ? transportState.last_transport || transportState.transport_mode : 'offline';
-      status.textContent = transportState.connected ? `✓ ${mode}` : '⚠ Disconnected';
-      status.style.color = transportState.connected ? '#27ae60' : '#e74c3c';
-    }
-  } catch {
-    if (status) {
-      status.textContent = '⚠ Error';
-      status.style.color = '#e74c3c';
-    }
-  }
-}
-
-function appendMessage(m) {
-  if (!messages) return;
-  if (currentChannel !== '*' && m.channel && m.channel !== currentChannel && m.to !== currentChannel && m.from_id !== currentChannel) return;
+function line(text, cls = 'sys') {
   const row = document.createElement('div');
-  const ts = document.createElement('span');
-  ts.textContent = `[${formatTime(m.ts || 0)}] `;
-  ts.style.color = '#7f8c8d';
-  ts.style.fontSize = '0.85rem';
-  const sender = document.createElement('strong');
-  sender.textContent = `${m.from_name || 'unknown'}: `;
-  sender.style.color = '#2c3e50';
-  const badge = document.createElement('span');
-  badge.textContent = `${getEncBadge(m.enc)} `;
-  badge.style.fontSize = '0.9rem';
-  const body = document.createElement('span');
-  body.textContent = m.body || '';
-  body.style.color = '#2c3e50';
-  row.append(ts, badge, sender, body);
-  messages.appendChild(row);
+  row.className = `line ${cls}`;
+  row.textContent = text;
+  el.output.appendChild(row);
+  while (el.output.children.length > MAX_LINES) {
+    el.output.removeChild(el.output.firstChild);
+  }
+  el.output.scrollTop = el.output.scrollHeight;
 }
 
-async function updateStatus() {
-  await fetchTransportStatus();
+function messageLine(msg) {
+  const fromId = msg.fromId || msg.from_id || 'unknown';
+  const fromName = msg.fromName || msg.from_name || fromId;
+  const ts = fmtTs(toSeconds(msg.ts));
+  const body = msg.text || msg.body || '';
+  const me = fromId === state.userId;
+  line(`[${ts}] ${fromName}${me ? ' (you)' : ''}: ${body}`, me ? 'me' : 'msg');
 }
 
-async function refresh() {
-  if (!messages) return;
-  try {
-    const res = await fetch(`/messages?since=${encodeURIComponent(lastTs)}`);
-    if (!res.ok) return;
-    const data = await res.json();
-    for (const m of data) {
-      appendMessage(m);
-      lastTs = Math.max(lastTs, Number(m.ts || 0));
-    }
-    messages.scrollTop = messages.scrollHeight;
-  } catch {}
+function updatePrompt() {
+  el.prompt.textContent = `${state.activeTarget} ›`;
 }
 
-async function sendMessage() {
-  if (!input || !send) return;
-  const body = input.value.trim();
-  if (!body || busy) return;
-  busy = true;
-  send.disabled = true;
-  try {
-    const res = await fetch('/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ body, ts: Date.now() / 1000, channel: currentChannel, enc: encMode }),
-    });
-    if (res.ok) {
-      input.value = '';
-    } else {
-      showError('Could not send message');
-    }
-  } finally {
-    busy = false;
-    send.disabled = false;
-    input?.focus();
-    refresh();
+function updateStatus() {
+  const mode = state.connected ? 'connected' : 'offline';
+  el.statusLeft.textContent = `${state.username || 'anon'} (${state.userId ? state.userId.slice(0, 8) : 'no-id'}) | ${state.activeTarget} | ${mode}`;
+  el.statusRight.textContent = `firebase-only | enc=${state.encMode} | auto-load=${state.autoLoad ? 'on' : 'off'}:${state.autoLoadLimit}`;
+}
+
+function updateSessionCard() {
+  el.sessionCard.innerHTML = [
+    `user: ${state.username || 'unset'}`,
+    `id: ${state.userId || 'none'}`,
+    `active: ${state.activeTarget}`,
+    `enc: ${state.encMode}`,
+    `transport: firebase`,
+  ].join('<br/>');
+}
+
+function renderChats() {
+  el.chatList.innerHTML = '';
+  const items = Array.from(state.chats);
+  items.sort((a, b) => a.localeCompare(b));
+  for (const target of items) {
+    const li = document.createElement('li');
+    li.textContent = target;
+    li.onclick = () => switchTarget(target);
+    el.chatList.appendChild(li);
   }
 }
 
-send?.addEventListener('click', sendMessage);
-input?.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter') sendMessage();
-});
+function renderPeers() {
+  el.peerList.innerHTML = '';
+  for (const p of state.peers) {
+    const li = document.createElement('li');
+    li.textContent = `${p.name || p.id} (${p.id})`;
+    li.onclick = () => runCommand(`/connect ${p.id}`);
+    el.peerList.appendChild(li);
+  }
+}
 
-input?.focus();
-clearMessages();
-updateStatus();
-setInterval(refresh, 500);
-setInterval(updateStatus, 2000);
-setInterval(fetchPeersAndChannels, 2000);
-setInterval(fetchFirebaseConfig, 4000);
-fetchPeersAndChannels();
-fetchFirebaseConfig();
-refresh();
-setTheme(theme);
-setEncMode(encMode);
+function messagePathForTarget(target) {
+  if (target === '@broadcast') return 'messages/broadcast';
+  if (target.startsWith('@')) return `messages/chan_${safeKey(target.slice(1).toLowerCase())}`;
+  return `messages/${safeKey(target)}`;
+}
+
+function outgoingToForTarget(target) {
+  if (target === '@broadcast') return '@broadcast';
+  return target;
+}
+
+async function listenTarget(target) {
+  if (state.unsubs.messages) state.unsubs.messages();
+  state.seenKeys.clear();
+  state.currentPath = messagePathForTarget(target);
+
+  const q = query(ref(state.db, state.currentPath), orderByChild('ts'), limitToLast(state.autoLoadLimit));
+  state.unsubs.messages = onChildAdded(q, (snap) => {
+    if (!state.autoLoad) return;
+    const dedupe = `${state.currentPath}:${snap.key}`;
+    if (state.seenKeys.has(dedupe)) return;
+    state.seenKeys.add(dedupe);
+    const msg = snap.val();
+    if (!msg || typeof msg !== 'object') return;
+    messageLine(msg);
+  });
+}
+
+async function loadLatest(limit) {
+  const q = query(ref(state.db, state.currentPath), orderByChild('ts'), limitToLast(limit));
+  const s = await get(q);
+  if (!s.exists()) {
+    line('No messages found for current target.', 'warn');
+    return;
+  }
+  const values = Object.values(s.val() || {});
+  for (const msg of values) messageLine(msg);
+}
+
+async function sendChatMessage(text) {
+  if (!text) return;
+  const payload = {
+    v: 2,
+    id: crypto.randomUUID(),
+    type: state.activeTarget.startsWith('@') ? 'msg' : 'msg',
+    fromId: state.userId,
+    from_id: state.userId,
+    fromName: state.username,
+    from_name: state.username,
+    to: outgoingToForTarget(state.activeTarget),
+    channel: state.activeTarget.startsWith('@') ? state.activeTarget : null,
+    text,
+    body: text,
+    ts: nowSec(),
+    enc: state.encMode,
+    scope: state.activeTarget.startsWith('@') ? 'public' : 'private',
+    source: 'web-terminal',
+  };
+
+  await push(ref(state.db, state.currentPath), payload);
+  line(`queued (${state.activeTarget})`, 'ok');
+}
+
+async function setPresence() {
+  if (!state.userId || !state.connected) return;
+  const presenceRef = ref(state.db, `presence/${safeKey(state.userId)}`);
+  await set(presenceRef, {
+    id: state.userId,
+    name: state.username,
+    online: true,
+    public: true,
+    updatedAt: serverTimestamp(),
+    transport: 'firebase-web',
+  });
+  onDisconnect(presenceRef).remove();
+}
+
+async function switchTarget(target) {
+  if (!target) return;
+  state.activeTarget = target;
+  state.chats.add(target);
+  saveLocal();
+  updatePrompt();
+  updateStatus();
+  updateSessionCard();
+  renderChats();
+  line(`Switched to ${target}`, 'ok');
+  await listenTarget(target);
+}
+
+function printHelp() {
+  line('Commands:', 'sys');
+  line('/help                              Show commands', 'sys');
+  line('/join <@channel>                    Join/switch channel', 'sys');
+  line('/connect <peer_id>                  Open direct chat target', 'sys');
+  line('/load [n|on|off]                    Manual load or auto-load control', 'sys');
+  line('/status                             Show session status', 'sys');
+  line('/whoami                             Show current identity', 'sys');
+  line('/enc <none|fernet|rsa|custom:...>   Set encryption tag', 'sys');
+  line('/name <display_name>                Set display name', 'sys');
+  line('/clear                              Clear terminal output', 'sys');
+  line('/menu                               Reopen start menu', 'sys');
+  line('/listen <port>                      Not supported in web (firebase-only)', 'sys');
+}
+
+async function runCommand(raw) {
+  const parts = raw.trim().split(/\s+/);
+  const cmd = (parts[0] || '').toLowerCase();
+
+  if (cmd === '/help') return printHelp();
+  if (cmd === '/clear') {
+    el.output.innerHTML = '';
+    return;
+  }
+  if (cmd === '/menu') {
+    el.menuOverlay.style.display = 'flex';
+    return;
+  }
+  if (cmd === '/status') {
+    line(`transport=firebase connected=${state.connected} target=${state.activeTarget} peers=${state.peers.length} autoLoad=${state.autoLoad}:${state.autoLoadLimit}`, 'sys');
+    return;
+  }
+  if (cmd === '/whoami') {
+    line(`username=${state.username} peer_id=${state.userId}`, 'sys');
+    return;
+  }
+  if (cmd === '/name') {
+    const next = raw.replace(/^\/name\s+/, '').trim();
+    if (!next) return line('Usage: /name <display_name>', 'warn');
+    state.username = next;
+    saveLocal();
+    updateStatus();
+    updateSessionCard();
+    await setPresence();
+    line(`Name updated to ${state.username}`, 'ok');
+    return;
+  }
+  if (cmd === '/enc') {
+    const next = raw.replace(/^\/enc\s+/, '').trim();
+    if (!next) return line('Usage: /enc <none|fernet|rsa|custom:...>', 'warn');
+    state.encMode = next;
+    saveLocal();
+    updateStatus();
+    updateSessionCard();
+    line(`enc mode set to ${state.encMode}`, 'ok');
+    return;
+  }
+  if (cmd === '/join') {
+    const target = parts[1];
+    if (!target) return line('Usage: /join <@channel>', 'warn');
+    const chan = target.startsWith('@') ? target : `@${target}`;
+    return switchTarget(chan);
+  }
+  if (cmd === '/connect') {
+    const peer = parts[1];
+    if (!peer) return line('Usage: /connect <peer_id>', 'warn');
+    return switchTarget(peer);
+  }
+  if (cmd === '/listen') {
+    line('Web client is firebase-only. /listen is CLI-only.', 'warn');
+    return;
+  }
+  if (cmd === '/load') {
+    const arg = parts[1];
+    if (!arg || arg === 'on' || arg === 'start') {
+      state.autoLoad = true;
+      updateStatus();
+      line(`Auto-load enabled (${state.autoLoadLimit})`, 'ok');
+      return;
+    }
+    if (arg === 'off' || arg === 'stop') {
+      state.autoLoad = false;
+      updateStatus();
+      line('Auto-load disabled', 'warn');
+      return;
+    }
+    const n = Number(arg);
+    if (!Number.isFinite(n) || n < 1) return line('Usage: /load [n|on|off]', 'warn');
+    const lim = Math.min(500, Math.floor(n));
+    state.autoLoadLimit = lim;
+    updateStatus();
+    line(`Loading latest ${lim} messages...`, 'sys');
+    await loadLatest(lim);
+    return;
+  }
+
+  line(`Unknown command: ${cmd}`, 'err');
+}
+
+async function handleInput() {
+  const value = el.cmd.value.trim();
+  if (!value) return;
+  el.cmd.value = '';
+
+  if (value.startsWith('/')) {
+    await runCommand(value);
+    return;
+  }
+
+  await sendChatMessage(value);
+}
+
+async function bootstrapFirebase() {
+  if (window.HERMES_FIREBASE_CONFIG) {
+    state.cfg = window.HERMES_FIREBASE_CONFIG;
+  } else {
+    const res = await fetch('/web-config');
+    state.cfg = await res.json();
+  }
+
+  state.app = initializeApp(state.cfg.firebase_web);
+  state.db = getDatabase(state.app);
+  state.auth = getAuth(state.app);
+
+  if (!state.userId) {
+    const cred = await signInAnonymously(state.auth);
+    state.userId = cred.user.uid;
+  }
+  if (!state.username) state.username = `web-${String(state.userId).slice(0, 6)}`;
+
+  saveLocal();
+
+  state.unsubs.connected = onValue(ref(state.db, '.info/connected'), async (s) => {
+    state.connected = !!s.val();
+    if (state.connected) {
+      try {
+        await setPresence();
+      } catch {
+        line('Presence update failed.', 'warn');
+      }
+    }
+    updateStatus();
+    updateSessionCard();
+  });
+
+  state.unsubs.presence = onValue(ref(state.db, 'presence'), (s) => {
+    const val = s.val() || {};
+    const arr = Object.values(val)
+      .filter((p) => p && p.id && p.id !== state.userId && p.online)
+      .sort((a, b) => String(a.name || a.id).localeCompare(String(b.name || b.id)));
+    state.peers = arr;
+    for (const p of arr) state.chats.add(String(p.id));
+    renderPeers();
+    renderChats();
+    updateStatus();
+  });
+
+  // Inbox listener for firebase direct messages pushed to this user id path.
+  if (state.unsubs.inbox) state.unsubs.inbox();
+  const inboxPath = `messages/${safeKey(state.userId)}`;
+  state.unsubs.inbox = onChildAdded(query(ref(state.db, inboxPath), orderByChild('ts'), limitToLast(200)), (snap) => {
+    if (!state.autoLoad) return;
+    if (state.activeTarget.startsWith('@')) return;
+    const msg = snap.val();
+    if (!msg || typeof msg !== 'object') return;
+    // Show inbox entries while in direct chat contexts.
+    messageLine(msg);
+  });
+}
+
+function wireMenu() {
+  el.menuName.value = state.username;
+  el.menuSaveName.onclick = async () => {
+    const next = el.menuName.value.trim();
+    if (!next) return;
+    state.username = next;
+    saveLocal();
+    updateStatus();
+    updateSessionCard();
+    await setPresence();
+    line(`Name set to ${state.username}`, 'ok');
+  };
+  el.menuOpen.onclick = async () => {
+    const target = el.menuOpenTarget.value.trim() || '@broadcast';
+    await switchTarget(target.startsWith('@') ? target : target);
+    el.menuOverlay.style.display = 'none';
+    el.cmd.focus();
+  };
+  el.menuJoinBtn.onclick = async () => {
+    const target = (el.menuJoin.value.trim() || '@broadcast');
+    const chan = target.startsWith('@') ? target : `@${target}`;
+    await switchTarget(chan);
+    el.menuOverlay.style.display = 'none';
+    el.cmd.focus();
+  };
+  el.menuConnectBtn.onclick = async () => {
+    const target = el.menuConnect.value.trim();
+    if (!target) return;
+    await switchTarget(target);
+    el.menuOverlay.style.display = 'none';
+    el.cmd.focus();
+  };
+}
+
+async function start() {
+  updatePrompt();
+  line('Booting Hermes web terminal...', 'sys');
+  await bootstrapFirebase();
+  wireMenu();
+  await switchTarget(state.activeTarget || '@broadcast');
+  printHelp();
+  updateStatus();
+  updateSessionCard();
+
+  el.cmd.addEventListener('keydown', async (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    await handleInput();
+  });
+
+  // Keep presence fresh.
+  setInterval(() => {
+    if (state.connected) setPresence().catch(() => {});
+  }, 30000);
+}
+
+start().catch((err) => {
+  console.error(err);
+  line(`Fatal startup error: ${err?.message || err}`, 'err');
+});

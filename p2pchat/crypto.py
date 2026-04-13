@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import importlib.util
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 
 from .identity import Identity
 
+logger = logging.getLogger("crypto")
 
 @dataclass
 class PluginWrapper:
@@ -30,7 +32,10 @@ class CryptoManager:
 
     def _load_known_peers(self) -> dict[str, dict[str, str]]:
         if self.known_peers_path.exists():
-            return json.loads(self.known_peers_path.read_text())
+            try:
+                return json.loads(self.known_peers_path.read_text())
+            except Exception:
+                return {}
         return {}
 
     def _save_known_peers(self) -> None:
@@ -69,12 +74,9 @@ class CryptoManager:
         self._save_known_peers()
         return key_kind
 
-    # Backward-compatible alias for existing CLI/tests callers.
-    def set_peer_public_key(self, peer_id: str, pem: str | Any) -> None:
-        self.set_peer_key(peer_id, pem)
-
     def _fallback_fernet_key(self) -> bytes:
-        return base64.urlsafe_b64encode(self.identity.public_key_bytes[:32].ljust(32, b"0"))
+        # Stable fallback key derived from identity to allow some level of "default" encryption
+        return base64.urlsafe_b64encode(self.identity.peer_id.encode("utf-8").ljust(32, b"0")[:32])
 
     def _fernet_key_for_peer(self, peer_id: str) -> bytes:
         peer = self.known_peers.get(peer_id, {})
@@ -97,6 +99,13 @@ class CryptoManager:
         if mode == "none":
             return body, "none"
 
+        # If we are broadcasting or sending to a channel, and RSA is selected,
+        # we must fallback to something broadcast-compatible (plain or symmetric)
+        # because RSA is point-to-point.
+        if (peer_id == "*" or peer_id.startswith("@")) and mode == "rsa":
+            logger.warning(f"RSA encryption requested for {peer_id}, falling back to plain.")
+            return body, "none"
+
         if mode == "fernet":
             token = Fernet(self._fernet_key_for_peer(peer_id)).encrypt(body.encode("utf-8"))
             return base64.b64encode(token).decode("ascii"), "fernet"
@@ -104,7 +113,9 @@ class CryptoManager:
         if mode == "rsa":
             peer = self.known_peers.get(peer_id)
             if not peer or "public_key" not in peer:
-                raise ValueError(f"unknown peer RSA key for {peer_id}")
+                # Instead of crashing, let's inform the user and suggest a fix
+                raise ValueError(f"Unknown RSA public key for {peer_id}. Use '/key {peer_id} <PEM>' to set it, or switch to '/crypto fernet' or '/crypto none'.")
+            
             public_key = serialization.load_pem_public_key(peer["public_key"].encode("utf-8"))
             ciphertext = public_key.encrypt(
                 body.encode("utf-8"),
@@ -112,7 +123,7 @@ class CryptoManager:
             )
             return base64.b64encode(ciphertext).decode("ascii"), "rsa"
 
-        if mode.startswith("plugin:") or mode.startswith("custom:"):
+        if mode.startswith("custom:") or mode.startswith("plugin:"):
             plugin_name = mode.split(":", 1)[1]
             plugin = next((p for p in self.plugins if p.name == plugin_name), None)
             if not plugin:
@@ -128,37 +139,46 @@ class CryptoManager:
         if enc == "none":
             return body
         if enc == "fernet":
-            plaintext = Fernet(self._fernet_key_for_peer(peer_id)).decrypt(base64.b64decode(body.encode("ascii")))
-            return plaintext.decode("utf-8")
+            try:
+                plaintext = Fernet(self._fernet_key_for_peer(peer_id)).decrypt(base64.b64decode(body.encode("ascii")))
+                return plaintext.decode("utf-8")
+            except Exception:
+                return f"[Decryption Error: Invalid Fernet key for {peer_id}]"
         if enc == "rsa":
-            plaintext = self.identity.private_key.decrypt(
-                base64.b64decode(body.encode("ascii")),
-                padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
-            )
-            return plaintext.decode("utf-8")
+            try:
+                plaintext = self.identity.private_key.decrypt(
+                    base64.b64decode(body.encode("ascii")),
+                    padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
+                )
+                return plaintext.decode("utf-8")
+            except Exception:
+                return "[Decryption Error: RSA decryption failed]"
         if enc.startswith("custom:"):
             plugin_name = enc.split(":", 1)[1]
             plugin = next((p for p in self.plugins if p.name == plugin_name), None)
             if not plugin:
-                raise ValueError(f"unknown plugin {plugin_name}")
+                return f"[Decryption Error: Plugin {plugin_name} missing]"
             plaintext = plugin.instance.decrypt(base64.b64decode(body.encode("ascii")), b"")
             return plaintext.decode("utf-8")
-        raise ValueError(f"unsupported enc {enc}")
+        return body
 
     def load_plugins(self, plugin_dir: Path) -> list[PluginWrapper]:
         loaded: list[PluginWrapper] = []
         if not plugin_dir.exists():
             return loaded
         for path in plugin_dir.glob("*.py"):
-            spec = importlib.util.spec_from_file_location(path.stem, path)
-            if not spec or not spec.loader:
+            try:
+                spec = importlib.util.spec_from_file_location(path.stem, path)
+                if not spec or not spec.loader:
+                    continue
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                for attr_name in dir(module):
+                    attr = getattr(module, attr_name)
+                    if isinstance(attr, type) and hasattr(attr, "name"):
+                        inst = attr()
+                        loaded.append(PluginWrapper(name=inst.name, instance=inst))
+                        break
+            except Exception:
                 continue
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            for attr_name in dir(module):
-                attr = getattr(module, attr_name)
-                if isinstance(attr, type) and hasattr(attr, "name"):
-                    inst = attr()
-                    loaded.append(PluginWrapper(name=inst.name, instance=inst))
-                    break
         return loaded
