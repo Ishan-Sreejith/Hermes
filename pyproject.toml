@@ -20,6 +20,10 @@ test = [
 firebase = [
   "firebase-admin",
 ]
+build = [
+  "build>=1.2.2",
+  "pyinstaller>=6.0.0",
+]
 
 [project.scripts]
 p2pchat = "p2pchat.main:main"
@@ -32,6 +36,9 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 include = ["p2pchat*"]
+
+[tool.setuptools.package-data]
+"p2pchat.web_ui" = ["templates/*.html", "static/*.js"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

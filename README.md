@@ -27,6 +27,12 @@ pip install -e .
 pip install -e '.[firebase]'
 ```
 
+For local one-command install:
+
+```bash
+./scripts/install_local.sh
+```
+
 ## Run
 
 Start relay server:
@@ -46,6 +52,22 @@ Start terminal client:
 ```bash
 hermes
 ```
+
+## Distribution
+
+Build package artifacts:
+
+```bash
+python3 -m build
+```
+
+Build standalone binaries:
+
+```bash
+./scripts/build_release.sh
+```
+
+See `PACKAGING.md` for full details.
 
 ## Firebase setup
 
