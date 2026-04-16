@@ -16,6 +16,7 @@ from .identity import Identity
 
 logger = logging.getLogger("crypto")
 
+
 @dataclass
 class PluginWrapper:
     name: str
@@ -23,12 +24,21 @@ class PluginWrapper:
 
 
 class CryptoManager:
-    def __init__(self, identity: Identity, known_peers_path: Path | None = None, plugin_dir: Path | None = None):
+    def __init__(
+        self,
+        identity: Identity,
+        known_peers_path: Path | None = None,
+        plugin_dir: Path | None = None,
+    ):
         self.identity = identity
-        self.known_peers_path = known_peers_path or Path.home() / ".p2pchat" / "known_peers.json"
+        self.known_peers_path = (
+            known_peers_path or Path.home() / ".p2pchat" / "known_peers.json"
+        )
         self.known_peers_path.parent.mkdir(parents=True, exist_ok=True)
         self.known_peers = self._load_known_peers()
-        self.plugins = self.load_plugins(plugin_dir or (Path.home() / ".p2pchat" / "plugins"))
+        self.plugins = self.load_plugins(
+            plugin_dir or (Path.home() / ".p2pchat" / "plugins")
+        )
 
     def _load_known_peers(self) -> dict[str, dict[str, str]]:
         if self.known_peers_path.exists():
@@ -69,14 +79,17 @@ class CryptoManager:
             entry["fernet_key"] = key_str
             key_kind = "fernet"
         else:
-            raise ValueError("key must be a PEM RSA public key or a URL-safe base64 Fernet key")
+            raise ValueError(
+                "key must be a PEM RSA public key or a URL-safe base64 Fernet key"
+            )
 
         self._save_known_peers()
         return key_kind
 
     def _fallback_fernet_key(self) -> bytes:
-        # Stable fallback key derived from identity to allow some level of "default" encryption
-        return base64.urlsafe_b64encode(self.identity.peer_id.encode("utf-8").ljust(32, b"0")[:32])
+        return base64.urlsafe_b64encode(
+            self.identity.peer_id.encode("utf-8").ljust(32, b"0")[:32]
+        )
 
     def _fernet_key_for_peer(self, peer_id: str) -> bytes:
         peer = self.known_peers.get(peer_id, {})
@@ -99,27 +112,35 @@ class CryptoManager:
         if mode == "none":
             return body, "none"
 
-        # If we are broadcasting or sending to a channel, and RSA is selected,
-        # we must fallback to something broadcast-compatible (plain or symmetric)
-        # because RSA is point-to-point.
         if (peer_id == "*" or peer_id.startswith("@")) and mode == "rsa":
-            logger.warning(f"RSA encryption requested for {peer_id}, falling back to plain.")
+            logger.warning(
+                f"RSA encryption requested for {peer_id}, falling back to plain."
+            )
             return body, "none"
 
         if mode == "fernet":
-            token = Fernet(self._fernet_key_for_peer(peer_id)).encrypt(body.encode("utf-8"))
+            token = Fernet(self._fernet_key_for_peer(peer_id)).encrypt(
+                body.encode("utf-8")
+            )
             return base64.b64encode(token).decode("ascii"), "fernet"
 
         if mode == "rsa":
             peer = self.known_peers.get(peer_id)
             if not peer or "public_key" not in peer:
-                # Instead of crashing, let's inform the user and suggest a fix
-                raise ValueError(f"Unknown RSA public key for {peer_id}. Use '/key {peer_id} <PEM>' to set it, or switch to '/crypto fernet' or '/crypto none'.")
-            
-            public_key = serialization.load_pem_public_key(peer["public_key"].encode("utf-8"))
+                raise ValueError(
+                    f"Unknown RSA public key for {peer_id}. Use '/key {peer_id} <PEM>' to set it, or switch to '/crypto fernet' or '/crypto none'."
+                )
+
+            public_key = serialization.load_pem_public_key(
+                peer["public_key"].encode("utf-8")
+            )
             ciphertext = public_key.encrypt(
                 body.encode("utf-8"),
-                padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
+                padding.OAEP(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None,
+                ),
             )
             return base64.b64encode(ciphertext).decode("ascii"), "rsa"
 
@@ -140,7 +161,9 @@ class CryptoManager:
             return body
         if enc == "fernet":
             try:
-                plaintext = Fernet(self._fernet_key_for_peer(peer_id)).decrypt(base64.b64decode(body.encode("ascii")))
+                plaintext = Fernet(self._fernet_key_for_peer(peer_id)).decrypt(
+                    base64.b64decode(body.encode("ascii"))
+                )
                 return plaintext.decode("utf-8")
             except Exception:
                 return f"[Decryption Error: Invalid Fernet key for {peer_id}]"
@@ -148,7 +171,11 @@ class CryptoManager:
             try:
                 plaintext = self.identity.private_key.decrypt(
                     base64.b64decode(body.encode("ascii")),
-                    padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None),
+                    padding.OAEP(
+                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                        algorithm=hashes.SHA256(),
+                        label=None,
+                    ),
                 )
                 return plaintext.decode("utf-8")
             except Exception:
@@ -158,7 +185,9 @@ class CryptoManager:
             plugin = next((p for p in self.plugins if p.name == plugin_name), None)
             if not plugin:
                 return f"[Decryption Error: Plugin {plugin_name} missing]"
-            plaintext = plugin.instance.decrypt(base64.b64decode(body.encode("ascii")), b"")
+            plaintext = plugin.instance.decrypt(
+                base64.b64decode(body.encode("ascii")), b""
+            )
             return plaintext.decode("utf-8")
         return body
 

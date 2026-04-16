@@ -1,77 +1,79 @@
-# Hermes
+# Hermes v0.2.1
 
-Hermes is a terminal-first chat app with a local relay server, direct peer messaging, and a Firebase-backed web terminal.
+A terminal-first P2P chat application with local relay server, direct peer messaging, Firebase fallback, and WebSocket support.
+
+## Quick Start
+
+Download the bundle from releases, extract it, and run:
+
+```
+./start.sh
+```
+
+Or install from source:
+
+```
+git clone <repo>
+cd hermes
+./scripts/install_unix.sh
+```
 
 ## Features
 
-- Terminal client with a startup menu
-- Direct TCP messaging and UDP hole punching
-- Firebase fallback transport
-- Browser terminal UI that uses Firebase only
-- RSA, Fernet, and plugin-based encryption
-- Local config and identity storage in `~/.p2pchat`
+### Messaging
+- Terminal client with interactive menu
+- Direct TCP/UDP peer messaging
+- Firebase fallback for reliability
+- RSA and Fernet encryption
+- Channel-based messaging
+
+### Extras
+- Message reactions
+- Typing indicators
+- Read receipts
+- File sharing
+- User profiles
+- Channel administration
+- Markdown formatting
+- WebSocket server
 
 ## Requirements
 
 - Python 3.10+
-- `cryptography`
-- `flask`
-- Optional: Firebase project for cloud mode
+- cryptography
+- flask
+- websockets
 
 ## Install
 
-```bash
+```
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-pip install -e '.[firebase]'
-```
-
-For local one-command install:
-
-```bash
-./scripts/install_local.sh
+pip install websockets>=10.0
 ```
 
 ## Run
 
-Start relay server:
-
-```bash
-hermes-server --port 7777
 ```
-
-Start web UI:
-
-```bash
-web-ui --port 8080
-```
-
-Start terminal client:
-
-```bash
-hermes
+hermes                      # Terminal client
+hermes-server --port 7777   # Relay server
+web-ui --port 8080          # Web UI
 ```
 
 ## Distribution
 
-Build package artifacts:
+Create a distributable bundle:
 
-```bash
-python3 -m build
+```
+python3 scripts/create_bundle.py --format both
 ```
 
-Build standalone binaries:
+This creates hermes-0.2.1-bundle.zip and hermes-0.2.1-bundle.tar.gz
 
-```bash
-./scripts/build_release.sh
-```
+## Firebase Setup
 
-See `PACKAGING.md` for full details.
-
-## Firebase setup
-
-Set Firebase values in `~/.p2pchat/config.json`:
+Edit `~/.p2pchat/config.json`:
 
 ```json
 {
@@ -79,32 +81,31 @@ Set Firebase values in `~/.p2pchat/config.json`:
     "backend": "firebase",
     "enabled": true,
     "project_id": "your-project-id",
-    "database_url": "https://your-project-id-default-rtdb.firebaseio.com",
-    "queue_path": "messages",
-    "delivery_ttl_s": 300,
-    "credentials_path": "/path/to/serviceAccountKey.json"
+    "database_url": "https://your-project.firebaseio.com"
   }
 }
 ```
 
-For static hosting, deploy `public/` and provide runtime config in your own environment.
+## Terminal Commands
 
-## Project layout
+- `/help` - Show commands
+- `/join <@chan>` - Join channel
+- `/peers` - List peers
+- `/ping <target>` - Ping peer
+- `/status` - Connection status
+- `/clear` - Clear messages
+- `/quit` - Exit
 
-- `p2pchat/main.py`: terminal entrypoint
-- `p2pchat/transport.py`: transport logic
-- `p2pchat/engine.py`: chat engine
-- `p2pchat/crypto.py`: crypto and plugins
-- `p2pchat/hermes_server.py`: relay server
-- `p2pchat/web_ui/`: Flask and browser terminal files
-- `public/`: static hosted web terminal files
-- `tests/`: automated tests
+## Project Structure
 
-## Notes
-
-- Web UI is Firebase-only by design.
-- Terminal can use direct transports first and fallback when needed.
-- Firebase credentials should not be committed to git.
+- `p2pchat/main.py` - Terminal entry point
+- `p2pchat/transport.py` - Transport layer
+- `p2pchat/engine.py` - Chat engine
+- `p2pchat/crypto.py` - Encryption
+- `p2pchat/features.py` - Extended features
+- `p2pchat/hermes_server.py` - Relay server
+- `p2pchat/websocket_server.py` - WebSocket server
+- `tests/` - Tests (83 total)
 
 ## License
 

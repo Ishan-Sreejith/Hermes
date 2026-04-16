@@ -17,8 +17,14 @@ from .ui import ChatUI
 
 logging.getLogger("firebase_admin").setLevel(logging.WARNING)
 
+
 class CLIApp:
-    def __init__(self, username: str | None = None, home: Path | None = None, listen_port: int | None = None):
+    def __init__(
+        self,
+        username: str | None = None,
+        home: Path | None = None,
+        listen_port: int | None = None,
+    ):
         self.home = home or (Path.home() / ".p2pchat")
         self.identity = load_or_create(self.home, username=username)
         self.listen_port = listen_port
@@ -39,13 +45,16 @@ class CLIApp:
             print("1) Open @broadcast")
             print("2) Join a channel")
             print("3) Set custom listen port")
-            print("4) Quit")
-            choice = (input("Choose [1]: ").strip() or "1")
+            print("4) Network tools")
+            print("5) Quit")
+            choice = input("Choose [1]: ").strip() or "1"
 
             if choice == "1":
                 return "@broadcast"
             if choice == "2":
-                channel = input("Channel name (example: @dev): ").strip() or "@broadcast"
+                channel = (
+                    input("Channel name (example: @dev): ").strip() or "@broadcast"
+                )
                 if not channel.startswith("@"):
                     channel = "@" + channel
                 return channel
@@ -63,7 +72,137 @@ class CLIApp:
                 print(f"Now listening on {bound}.")
                 continue
             if choice == "4":
+                await self.network_tools_menu()
+                continue
+            if choice == "5":
                 sys.exit(0)
+            print("Invalid menu option.")
+
+    async def network_tools_menu(self):
+        while True:
+            print("\n--- Network Tools ---")
+            print("1) Show network status")
+            print("2) List online peers")
+            print("3) Ping peer by id")
+            print("4) Ping host:port")
+            print("5) Resolve hostname (DNS)")
+            print("6) Scan common ports on host")
+            print("7) Show LAN devices (ARP)")
+            print("8) Set listen port")
+            print("9) Create random listen port")
+            print("10) Back")
+            choice = input("Choose [10]: ").strip() or "10"
+
+            if choice == "1":
+                s = self.transport.status
+                print(f"Public IP: {s.get('ip')}")
+                print(f"TCP listen: {s.get('port')}")
+                print(f"UDP listen: {s.get('udp_port')}")
+                print(f"Last transport: {s.get('last_transport')}")
+                continue
+            if choice == "2":
+                peers = self.transport.list_online_peers()
+                if not peers:
+                    print("No peers online.")
+                else:
+                    for p in peers:
+                        print(
+                            f"- {p['name']} ({p['id']}) {p.get('ip')}:{p.get('port')}"
+                        )
+                continue
+            if choice == "3":
+                peer_id = input("Peer id: ").strip()
+                if not peer_id:
+                    print("Peer id is required.")
+                    continue
+                result = await self.transport.ping_peer(peer_id)
+                if result.get("ok"):
+                    print(f"Ping ok: {peer_id} in {result.get('latency_ms')} ms")
+                else:
+                    print(f"Ping failed: {result.get('error', 'unknown error')}")
+                continue
+            if choice == "4":
+                target = input("Host:port (default port 80): ").strip()
+                if not target:
+                    print("Target is required.")
+                    continue
+                if ":" in target:
+                    host, port_s = target.rsplit(":", 1)
+                    try:
+                        port = int(port_s)
+                    except ValueError:
+                        print("Invalid port.")
+                        continue
+                else:
+                    host = target
+                    port = 80
+                result = await self.transport.ping_host(host, port)
+                if result.get("ok"):
+                    print(f"Ping ok: {host}:{port} in {result.get('latency_ms')} ms")
+                else:
+                    print(f"Ping failed: {result.get('error', 'unknown error')}")
+                continue
+            if choice == "5":
+                host = input("Hostname/IP: ").strip()
+                if not host:
+                    print("Hostname/IP is required.")
+                    continue
+                result = await self.transport.resolve_host(host)
+                if not result.get("ok"):
+                    print(f"Resolve failed: {result.get('error', 'unknown error')}")
+                    continue
+                print(f"Resolved in {result.get('latency_ms')} ms:")
+                for addr in result.get("addresses", []):
+                    print(f"- {addr}")
+                continue
+            if choice == "6":
+                host = input("Host/IP to scan: ").strip()
+                if not host:
+                    print("Host/IP is required.")
+                    continue
+                result = await self.transport.scan_common_ports(host)
+                open_ports = result.get("open_ports") or []
+                print(
+                    f"Scan finished in {result.get('elapsed_ms')} ms, checked {result.get('checked')} ports."
+                )
+                if not open_ports:
+                    print("No common open ports found.")
+                else:
+                    print("Open ports:")
+                    for p in open_ports:
+                        print(f"- {host}:{p['port']} ({p['latency_ms']} ms)")
+                continue
+            if choice == "7":
+                result = await self.transport.list_lan_devices()
+                if not result.get("ok"):
+                    print(
+                        f"LAN discovery failed: {result.get('error', 'unknown error')}"
+                    )
+                    continue
+                print(f"LAN devices in ARP cache: {result.get('count')}")
+                for d in result.get("devices", []):
+                    print(f"- {d['ip']} {d['mac']} ({d['host']})")
+                continue
+            if choice == "8":
+                raw = input("Listen port (1-65535): ").strip()
+                try:
+                    port = int(raw)
+                    if port < 1 or port > 65535:
+                        raise ValueError
+                except ValueError:
+                    print("Invalid port.")
+                    continue
+                bound = await self.transport.set_listen_port(port)
+                self.listen_port = bound
+                print(f"Now listening on {bound}.")
+                continue
+            if choice == "9":
+                bound = await self.transport.create_random_listen_port()
+                self.listen_port = bound
+                print(f"Random listen port created: {bound}")
+                continue
+            if choice == "10":
+                return
             print("Invalid menu option.")
 
     async def initialize(self):
@@ -87,6 +226,7 @@ class CLIApp:
         self.transport.update_presence()
 
         initial_channel = await self.startup_menu()
+        await self.transport.start_personal_inbox_listener()
         await self.engine.join_channel(initial_channel)
         self.ui.active_channel = initial_channel
 
@@ -95,7 +235,8 @@ class CLIApp:
         while True:
             try:
                 self.transport.update_presence()
-            except Exception: pass
+            except Exception:
+                pass
             await asyncio.sleep(60)
 
     def run(self):
@@ -115,9 +256,15 @@ class CLIApp:
 
         loop.call_soon_threadsafe(loop.stop)
 
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--listen-port", type=int, default=None, help="Bind direct listener to this port (default: auto)")
+    parser.add_argument(
+        "--listen-port",
+        type=int,
+        default=None,
+        help="Bind direct listener to this port (default: auto)",
+    )
     args = parser.parse_args()
 
     try:
@@ -125,6 +272,7 @@ def main():
         app.run()
     except (KeyboardInterrupt, EOFError):
         print("\nGoodbye!")
+
 
 if __name__ == "__main__":
     main()

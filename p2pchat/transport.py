@@ -4,9 +4,11 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import socket
 import struct
+import subprocess
 import time
 import urllib.parse
 import urllib.request
@@ -190,6 +192,12 @@ class FirebaseTransport:
 
     def get_peer_presence(self, peer_id: str) -> dict | None:
         return self._request(f"presence/{peer_id}")
+
+    def get_all_presence(self) -> dict[str, dict] | None:
+        data = self._request("presence")
+        if isinstance(data, dict):
+            return data
+        return None
 
 
 class DirectPeer:
@@ -441,6 +449,7 @@ class TransportManager:
             "last_transport": None,
             "hermes_connected": False,
         }
+        self._inbox_path: str | None = None
 
     def set_on_message(self, callback):
         self._on_message = callback
@@ -491,6 +500,16 @@ class TransportManager:
             self.fb.listen(res["path"], self._on_message)
         return res
 
+    async def start_personal_inbox_listener(self):
+        if not getattr(self.identity, "peer_id", None):
+            return
+        self._inbox_path = f"messages/{self.identity.peer_id}"
+        history = await self.fb.fetch_history(self._inbox_path, limit=20)
+        for m in history:
+            if self._on_message:
+                self._on_message(m)
+        self.fb.listen(self._inbox_path, self._on_message)
+
     async def load_more(self, channel, limit=50):
         safe_target = channel.replace("@", "chan_").replace("*", "broadcast")
         if safe_target == "broadcast":
@@ -518,12 +537,143 @@ class TransportManager:
         self.update_presence()
         return int(self.status["direct_port"])
 
+    async def create_random_listen_port(self) -> int:
+        return await self.set_listen_port(0)
+
+    def list_online_peers(self) -> list[dict]:
+        data = self.fb.get_all_presence() or {}
+        peers = []
+        for _, item in data.items():
+            if not isinstance(item, dict):
+                continue
+            if not item.get("online"):
+                continue
+            pid = str(item.get("id") or "")
+            if not pid or pid == getattr(self.identity, "peer_id", None):
+                continue
+            peers.append(
+                {
+                    "id": pid,
+                    "name": item.get("name") or pid,
+                    "ip": item.get("ip"),
+                    "port": item.get("port"),
+                    "udp_port": item.get("udp_port"),
+                }
+            )
+        peers.sort(key=lambda p: str(p.get("name")))
+        return peers
+
+    async def ping_host(self, host: str, port: int, timeout_s: float = 2.0) -> dict:
+        started = time.perf_counter()
+        try:
+            reader, writer = await asyncio.wait_for(asyncio.open_connection(host, int(port)), timeout=timeout_s)
+            writer.close()
+            await writer.wait_closed()
+            elapsed = int((time.perf_counter() - started) * 1000)
+            return {"ok": True, "host": host, "port": int(port), "latency_ms": elapsed}
+        except Exception as e:
+            elapsed = int((time.perf_counter() - started) * 1000)
+            return {"ok": False, "host": host, "port": int(port), "latency_ms": elapsed, "error": str(e)}
+
+    async def ping_peer(self, peer_id: str) -> dict:
+        presence = self.fb.get_peer_presence(peer_id)
+        if not isinstance(presence, dict):
+            return {"ok": False, "peer_id": peer_id, "error": "peer not found in presence"}
+        ip = presence.get("ip")
+        port = presence.get("port")
+        if not ip or not port:
+            return {"ok": False, "peer_id": peer_id, "error": "peer has no reachable ip/port"}
+        result = await self.ping_host(str(ip), int(port))
+        result["peer_id"] = peer_id
+        return result
+
+    async def resolve_host(self, host: str) -> dict:
+        loop = asyncio.get_running_loop()
+        started = time.perf_counter()
+        try:
+            infos = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+            addrs = sorted({item[4][0] for item in infos if item and item[4]})
+            elapsed = int((time.perf_counter() - started) * 1000)
+            if not addrs:
+                return {"ok": False, "host": host, "latency_ms": elapsed, "error": "no address found"}
+            return {"ok": True, "host": host, "latency_ms": elapsed, "addresses": addrs}
+        except Exception as e:
+            elapsed = int((time.perf_counter() - started) * 1000)
+            return {"ok": False, "host": host, "latency_ms": elapsed, "error": str(e)}
+
+    async def scan_common_ports(self, host: str, ports: list[int] | None = None, timeout_s: float = 0.45) -> dict:
+        if not ports:
+            ports = [22, 53, 80, 123, 135, 139, 443, 445, 3306, 3389, 5432, 6379, 8080]
+
+        async def _probe(p: int):
+            res = await self.ping_host(host, int(p), timeout_s=timeout_s)
+            return int(p), bool(res.get("ok")), int(res.get("latency_ms", 0))
+
+        started = time.perf_counter()
+        results = await asyncio.gather(*[_probe(p) for p in ports], return_exceptions=True)
+        open_ports: list[dict] = []
+        failed = 0
+        for item in results:
+            if isinstance(item, Exception):
+                failed += 1
+                continue
+            port, ok, latency = item
+            if ok:
+                open_ports.append({"port": port, "latency_ms": latency})
+        elapsed = int((time.perf_counter() - started) * 1000)
+        open_ports.sort(key=lambda p: p["port"])
+        return {
+            "ok": True,
+            "host": host,
+            "elapsed_ms": elapsed,
+            "checked": len(ports),
+            "failed_probes": failed,
+            "open_ports": open_ports,
+        }
+
+    async def list_lan_devices(self) -> dict:
+        def _run_arp() -> str:
+            out = subprocess.run(["arp", "-a"], capture_output=True, text=True, timeout=8)
+            if out.returncode != 0 and out.stderr:
+                raise RuntimeError(out.stderr.strip())
+            return out.stdout or ""
+
+        try:
+            output = await asyncio.to_thread(_run_arp)
+        except Exception as e:
+            return {"ok": False, "error": str(e), "devices": []}
+
+        devices = []
+        for line in output.splitlines():
+            match = re.search(r"\(([\d.]+)\)\s+at\s+([0-9a-fA-F:.-]+)", line)
+            if not match:
+                continue
+            ip = match.group(1)
+            mac = match.group(2)
+            hostname = line.split("(", 1)[0].strip() or "unknown"
+            devices.append({"host": hostname, "ip": ip, "mac": mac})
+
+        devices.sort(key=lambda d: d["ip"])
+        return {"ok": True, "count": len(devices), "devices": devices}
+
     async def _send_via_firebase(self, target_id: str, msg: dict) -> bool:
         safe_target = target_id.replace("@", "chan_").replace("*", "broadcast")
         if safe_target == "broadcast":
             safe_target = "broadcast"
         path = f"messages/{safe_target}"
         ok = await self.fb.send(path, msg)
+        if ok:
+            self.status["last_transport"] = "firebase"
+        return ok
+
+    async def _send_direct_via_firebase(self, target_id: str, msg: dict) -> bool:
+        target_path = f"messages/{target_id}"
+        ok = await self.fb.send(target_path, msg)
+
+        self_id = getattr(self.identity, "peer_id", None)
+        if self_id and self_id != target_id:
+            await self.fb.send(f"messages/{self_id}", msg)
+
         if ok:
             self.status["last_transport"] = "firebase"
         return ok
@@ -575,7 +725,7 @@ class TransportManager:
             if await self._send_direct_udp(target_id, presence, msg):
                 return True
 
-        return await self._send_via_firebase(target_id, msg)
+        return await self._send_direct_via_firebase(target_id, msg)
 
     async def broadcast(self, msg) -> bool:
         ok = await self.fb.send("messages/broadcast", msg)
