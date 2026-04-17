@@ -15,6 +15,7 @@ p2pchat.egg-info/
 tests/
 
 # Local tooling and editor state
+# I did not use any of these AI agents but their config folders were created by default
 .agents/
 .claude/
 .continue/
