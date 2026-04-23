@@ -14,7 +14,6 @@ from .protocol import read_message, write_message
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("hermes_server")
 
-# Persistent Store for Users (Simple JSON for now)
 DATA_DIR = Path.home() / ".hermes_server"
 DATA_DIR.mkdir(exist_ok=True)
 USER_DB_PATH = DATA_DIR / "users.json"
@@ -27,10 +26,9 @@ def load_db() -> dict:
 def save_db(db: dict):
     USER_DB_PATH.write_text(json.dumps(db, indent=2))
 
-# In-memory state
 connections: dict[str, asyncio.StreamWriter] = {}
 channels: dict[str, set[str]] = defaultdict(set)
-channel_passwords: dict[str, str] = {} # channel -> hashed password
+channel_passwords: dict[str, str] = {}
 
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     peer_id = None
@@ -89,26 +87,22 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 body = msg.get("body")
                 if not peer_id or not isinstance(body, dict): continue
                 
-                # Global broadcast
                 if target == "@broadcast" or target == "*":
                     for pid, w in list(connections.items()):
                         if pid != peer_id:
                             await write_message(w, body)
-                
-                # Channel Relay
+
                 elif isinstance(target, str) and target.startswith("@"):
                     if peer_id not in channels.get(target, set()):
-                        # Auto-join if no password set
                         if target not in channel_passwords:
                             channels[target].add(peer_id)
                         else:
-                            continue # Peer must join first with password
+                            continue
                     
                     for pid in list(channels.get(target, set())):
                         if pid in connections and pid != peer_id:
                             await write_message(connections[pid], body)
 
-                # Direct Relay
                 elif isinstance(target, str) and target in connections:
                     await write_message(connections[target], body)
 

@@ -27,11 +27,22 @@ tests/
 skills/
 skills-lock.json
 p2pchat/scratch/
+ih.sh
+path/
 
 # Firebase local state and credentials
 .firebase/
 .firebaserc
+.runtimeconfig.json
+firebase-debug.log
+firebase-debug.*.log
 serviceAccountKey.json
 service-account*.json
 *firebase*credentials*.json
+*firebase*config*.json
 public/firebase-config.js
+
+# Build outputs
+build/
+dist/
+venv/

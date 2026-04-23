@@ -18,16 +18,16 @@ logger = logging.getLogger("features")
 
 
 class ReactionType(str, Enum):
-    THUMBS_UP = "👍"
-    THUMBS_DOWN = "👎"
-    HEART = "❤️"
-    LAUGH = "😂"
-    WOW = "😮"
-    SAD = "😢"
-    ANGRY = "😡"
-    THINKING = "🤔"
-    ROCKET = "🚀"
-    EYES = "👀"
+    THUMBS_UP = "thumbs_up"
+    THUMBS_DOWN = "thumbs_down"
+    HEART = "heart"
+    LAUGH = "laugh"
+    WOW = "wow"
+    SAD = "sad"
+    ANGRY = "angry"
+    THINKING = "thinking"
+    ROCKET = "rocket"
+    EYES = "eyes"
 
     @classmethod
     def from_emoji(cls, emoji: str) -> "ReactionType | None":

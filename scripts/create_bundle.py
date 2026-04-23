@@ -14,7 +14,7 @@ import zipfile
 from pathlib import Path
 
 
-HERMES_VERSION = "0.2.1"
+HERMES_VERSION = "0.3.0"
 
 
 def run_command(cmd: list[str], cwd: Path | None = None, env: dict | None = None):
@@ -55,12 +55,10 @@ def create_python_bundle(root_dir: Path, output_dir: Path):
     print("Copying startup scripts...")
     with open(bundle_dir / "start.sh", "w") as f:
         f.write(f"""#!/bin/bash
-# Hermes v{HERMES_VERSION} Startup Script
 
 HERMES_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$HERMES_DIR/hermes/bin/activate"
 
-# Check for Firebase config
 if [ ! -f ~/.p2pchat/config.json ]; then
     echo "First time setup detected!"
     echo "Creating config at ~/.p2pchat/"
@@ -79,7 +77,6 @@ exec "$HERMES_DIR/hermes/bin/hermes" "$@"
 
     with open(bundle_dir / "start-server.sh", "w") as f:
         f.write(f"""#!/bin/bash
-# Hermes v{HERMES_VERSION} Server Startup Script
 
 HERMES_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$HERMES_DIR/hermes/bin/activate"
@@ -90,7 +87,6 @@ exec "$HERMES_DIR/hermes/bin/hermes-server" --host 0.0.0.0 --port 7777 "$@"
 
     with open(bundle_dir / "start-web.sh", "w") as f:
         f.write(f"""#!/bin/bash
-# Hermes v{HERMES_VERSION} Web UI Startup Script
 
 HERMES_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$HERMES_DIR/hermes/bin/activate"

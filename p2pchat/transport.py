@@ -40,6 +40,22 @@ class FirebaseTransport:
         self._seen_ids = set()
         self._last_key_by_path: dict[str, str] = {}
         self._active_tasks = {}
+        self._next_seq_by_path: dict[str, int] = {}
+        self._seq_by_path_key: dict[str, dict[str, int]] = {}
+        self._seen_count_by_path: dict[str, int] = {}
+        self._last_reconcile_ts_by_path: dict[str, float] = {}
+        self._last_ts_by_path: dict[str, float] = {}
+
+    def _to_seconds(self, raw_ts: Any) -> float:
+        try:
+            ts = float(raw_ts)
+        except (TypeError, ValueError):
+            return time.time()
+        if ts <= 0:
+            return time.time()
+        if ts > 10_000_000_000:
+            ts = ts / 1000.0
+        return ts
 
     def _request(self, path: str, method: str = "GET", data: Any = None, params: dict | None = None) -> Any:
         if not self.db_url:
@@ -91,38 +107,164 @@ class FirebaseTransport:
         return {"ok": True, "path": path}
 
     def _mark_seen(self, path: str, key: str):
-        self._seen_ids.add(f"{path}:{key}")
+        marker = f"{path}:{key}"
+        if marker not in self._seen_ids:
+            self._seen_ids.add(marker)
+            self._seen_count_by_path[path] = self._seen_count_by_path.get(path, 0) + 1
         self._last_key_by_path[path] = key
 
     def _is_seen(self, path: str, key: str) -> bool:
         return f"{path}:{key}" in self._seen_ids
 
+    def _assign_seq(self, path: str, msg_key: str) -> int:
+        path_map = self._seq_by_path_key.setdefault(path, {})
+        existing = path_map.get(msg_key)
+        if existing is not None:
+            return existing
+
+        next_seq = self._next_seq_by_path.get(path, 1)
+        path_map[msg_key] = next_seq
+        self._next_seq_by_path[path] = next_seq + 1
+        return next_seq
+
     def _normalize_msg(self, path: str, msg_key: str, raw_msg: Any) -> dict | None:
         if not isinstance(raw_msg, dict):
             return None
         msg = dict(raw_msg)
+        if msg.get("fromId") and not msg.get("from_id"):
+            msg["from_id"] = msg.get("fromId")
+        if msg.get("fromName") and not msg.get("from_name"):
+            msg["from_name"] = msg.get("fromName")
+        if msg.get("text") and not msg.get("body"):
+            msg["body"] = msg.get("text")
+        if msg.get("from_id") and not msg.get("fromId"):
+            msg["fromId"] = msg.get("from_id")
+        if msg.get("from_name") and not msg.get("fromName"):
+            msg["fromName"] = msg.get("from_name")
+        if msg.get("body") and not msg.get("text"):
+            msg["text"] = msg.get("body")
         if not msg.get("id"):
             msg["id"] = msg_key
+        msg["ts"] = self._to_seconds(msg.get("ts"))
+        msg["_seq"] = self._assign_seq(path, msg_key)
+        msg["_path"] = path
         msg["_firebase_key"] = msg_key
         self._mark_seen(path, msg_key)
+        current_last_ts = self._last_ts_by_path.get(path, 0.0)
+        if msg["ts"] > current_last_ts:
+            self._last_ts_by_path[path] = msg["ts"]
         return msg
+
+    def _count_remote_messages(self, path: str) -> int | None:
+        data = self._request(path, params={"shallow": "true"})
+        if isinstance(data, dict):
+            return len(data)
+        return None
+
+    def _maybe_reconcile_gap(self, path: str, limit: int = 300) -> list[dict]:
+        now = time.time()
+        last = self._last_reconcile_ts_by_path.get(path, 0.0)
+        if now - last < 2.0:
+            return []
+
+        self._last_reconcile_ts_by_path[path] = now
+        remote_count = self._count_remote_messages(path)
+        if remote_count is None:
+            return []
+
+        seen_count = self._seen_count_by_path.get(path, 0)
+        if remote_count <= seen_count:
+            return []
+
+        catchup_limit = min(max(limit, 100), 600)
+        data = self._request(
+            path,
+            params={"orderBy": '"$key"', "limitToLast": catchup_limit},
+        )
+        msgs = []
+        if isinstance(data, dict):
+            for msg_id in sorted(data.keys()):
+                if self._is_seen(path, msg_id):
+                    continue
+                msg = self._normalize_msg(path, msg_id, data[msg_id])
+                if msg is not None:
+                    msgs.append(msg)
+        return msgs
+
+    def _prepare_outgoing_msg(self, path: str, msg: dict) -> dict:
+        out = dict(msg or {})
+        out.setdefault("id", str(uuid4()))
+        out.setdefault("ts", time.time())
+        out.setdefault("enc", "none")
+        out.setdefault("v", 2)
+        out.setdefault("source", "cli")
+
+        if not out.get("to"):
+            if path.endswith("/broadcast"):
+                out["to"] = "@broadcast"
+            elif "/chan_" in path:
+                channel = path.rsplit("/chan_", 1)[-1]
+                out["to"] = f"@{channel}"
+            elif "/messages/" in path:
+                out["to"] = path.rsplit("/messages/", 1)[-1]
+        if out.get("to") == "*":
+            out["to"] = "@broadcast"
+
+        if out.get("from_id") and not out.get("fromId"):
+            out["fromId"] = out.get("from_id")
+        if out.get("fromId") and not out.get("from_id"):
+            out["from_id"] = out.get("fromId")
+        if out.get("from_name") and not out.get("fromName"):
+            out["fromName"] = out.get("from_name")
+        if out.get("fromName") and not out.get("from_name"):
+            out["from_name"] = out.get("fromName")
+        if out.get("body") and not out.get("text"):
+            out["text"] = out.get("body")
+        if out.get("text") and not out.get("body"):
+            out["body"] = out.get("text")
+
+        if not out.get("scope"):
+            to = str(out.get("to") or "")
+            out["scope"] = "public" if to.startswith("@") else "private"
+
+        if not out.get("fromId"):
+            out["fromId"] = str(getattr(self.identity, "peer_id", "") or "")
+        if not out.get("from_id"):
+            out["from_id"] = out["fromId"]
+
+        if not out.get("fromName"):
+            out["fromName"] = str(getattr(self.identity, "username", "unknown") or "unknown")
+        if not out.get("from_name"):
+            out["from_name"] = out["fromName"]
+
+        return out
 
     async def poll_loop(self, path: str, callback: Callable):
         while True:
             try:
-                cursor = self._last_key_by_path.get(path)
-                if cursor:
+                last_ts = self._last_ts_by_path.get(path, 0.0)
+                if last_ts > 0:
                     data = self._request(
                         path,
-                        params={"orderBy": '"$key"', "startAt": f'"{cursor}"', "limitToFirst": 100},
+                        params={"orderBy": '"ts"', "startAt": max(0.0, last_ts - 0.001), "limitToLast": 250},
                     )
                 else:
-                    data = self._request(path, params={"orderBy": '"$key"', "limitToLast": 20})
+                    data = self._request(
+                        path,
+                        params={"orderBy": '"ts"', "limitToLast": 250},
+                    )
                 if isinstance(data, dict):
-                    for msg_id in sorted(data.keys()):
+                    ordered = sorted(
+                        data.items(),
+                        key=lambda kv: (
+                            self._to_seconds((kv[1] or {}).get("ts")),
+                            str(kv[0]),
+                        ),
+                    )
+                    for msg_id, payload in ordered:
                         if self._is_seen(path, msg_id):
                             continue
-                        msg = self._normalize_msg(path, msg_id, data[msg_id])
+                        msg = self._normalize_msg(path, msg_id, payload)
                         if msg is not None:
                             callback(msg)
                 await asyncio.sleep(1.0)
@@ -146,25 +288,54 @@ class FirebaseTransport:
         return msgs
 
     async def fetch_new(self, path: str, limit: int = 100) -> list[dict]:
-        cursor = self._last_key_by_path.get(path)
-        if cursor:
-            params = {"orderBy": '"$key"', "startAt": f'"{cursor}"', "limitToFirst": limit}
+        last_ts = self._last_ts_by_path.get(path, 0.0)
+        if last_ts > 0:
+            params = {
+                "orderBy": '"ts"',
+                "startAt": max(0.0, last_ts - 0.001),
+                "limitToLast": max(80, min(limit * 4, 800)),
+            }
         else:
-            params = {"orderBy": '"$key"', "limitToLast": max(20, min(limit, 100))}
+            params = {"orderBy": '"ts"', "limitToLast": max(80, min(limit * 4, 800))}
         data = self._request(path, params=params)
         msgs = []
         if isinstance(data, dict):
-            for msg_id in sorted(data.keys()):
+            ordered = sorted(
+                data.items(),
+                key=lambda kv: (
+                    self._to_seconds((kv[1] or {}).get("ts")),
+                    str(kv[0]),
+                ),
+            )
+            for msg_id, payload in ordered:
                 if self._is_seen(path, msg_id):
                     continue
-                msg = self._normalize_msg(path, msg_id, data[msg_id])
+                msg = self._normalize_msg(path, msg_id, payload)
                 if msg is not None:
                     msgs.append(msg)
+        reconciled = self._maybe_reconcile_gap(path, limit=max(200, limit * 2))
+        if reconciled:
+            msgs.extend(reconciled)
+            msgs.sort(key=lambda m: int(m.get("_seq", 0)))
         return msgs
 
     async def send(self, path, msg) -> bool:
-        res = self._request(path, method="POST", data=msg)
+        prepared = self._prepare_outgoing_msg(path, msg)
+        res = self._request(path, method="POST", data=prepared)
         return res is not None
+
+    def get_sync_stats(self, path: str) -> dict:
+        remote_count = self._count_remote_messages(path)
+        seen_count = self._seen_count_by_path.get(path, 0)
+        gap = None
+        if isinstance(remote_count, int):
+            gap = max(0, remote_count - seen_count)
+        return {
+            "path": path,
+            "remote_count": remote_count,
+            "seen_count": seen_count,
+            "gap": gap,
+        }
 
     def update_presence(
         self,
@@ -511,25 +682,34 @@ class TransportManager:
         self.fb.listen(self._inbox_path, self._on_message)
 
     async def load_more(self, channel, limit=50):
-        safe_target = channel.replace("@", "chan_").replace("*", "broadcast")
-        if safe_target == "broadcast":
-            safe_target = "broadcast"
-        path = f"messages/{safe_target}"
+        path = self._path_for_target(channel)
         history = await self.fb.fetch_history(path, limit=limit)
         for m in history:
             if self._on_message:
                 self._on_message(m)
 
     async def load_new_messages(self, channel, limit=100):
-        safe_target = channel.replace("@", "chan_").replace("*", "broadcast")
-        if safe_target == "broadcast":
-            safe_target = "broadcast"
-        path = f"messages/{safe_target}"
+        path = self._path_for_target(channel)
         history = await self.fb.fetch_new(path, limit=limit)
         for m in history:
             if self._on_message:
                 self._on_message(m)
         return len(history)
+
+    def get_sync_status(self, channel: str) -> dict:
+        path = self._path_for_target(channel)
+        return self.fb.get_sync_stats(path)
+
+    def _path_for_target(self, target: str) -> str:
+        raw = str(target or "")
+        if raw in {"*", "broadcast", "@broadcast"}:
+            return "messages/broadcast"
+        if raw.startswith("@"):
+            raw = "@" + raw[1:].lower()
+        safe_target = raw.replace("@", "chan_").replace("*", "broadcast")
+        if safe_target == "broadcast":
+            safe_target = "broadcast"
+        return f"messages/{safe_target}"
 
     async def set_listen_port(self, port: int) -> int:
         self.status["direct_port"] = await self.direct_peer.listen_tcp(port)
@@ -657,7 +837,16 @@ class TransportManager:
         return {"ok": True, "count": len(devices), "devices": devices}
 
     async def _send_via_firebase(self, target_id: str, msg: dict) -> bool:
-        safe_target = target_id.replace("@", "chan_").replace("*", "broadcast")
+        raw = str(target_id or "")
+        if raw in {"*", "broadcast", "@broadcast"}:
+            path = "messages/broadcast"
+            ok = await self.fb.send(path, msg)
+            if ok:
+                self.status["last_transport"] = "firebase"
+            return ok
+        if raw.startswith("@"):
+            raw = "@" + raw[1:].lower()
+        safe_target = raw.replace("@", "chan_").replace("*", "broadcast")
         if safe_target == "broadcast":
             safe_target = "broadcast"
         path = f"messages/{safe_target}"
@@ -677,6 +866,15 @@ class TransportManager:
         if ok:
             self.status["last_transport"] = "firebase"
         return ok
+
+    async def _sync_direct_to_firebase(self, target_id: str, msg: dict) -> None:
+        try:
+            await self.fb.send(f"messages/{target_id}", msg)
+            self_id = getattr(self.identity, "peer_id", None)
+            if self_id and self_id != target_id:
+                await self.fb.send(f"messages/{self_id}", msg)
+        except Exception:
+            pass
 
     async def _send_direct_tcp(self, presence: dict, msg: dict) -> bool:
         ip = presence.get("ip")
@@ -721,8 +919,10 @@ class TransportManager:
         presence = self.fb.get_peer_presence(target_id)
         if isinstance(presence, dict):
             if await self._send_direct_tcp(presence, msg):
+                await self._sync_direct_to_firebase(target_id, msg)
                 return True
             if await self._send_direct_udp(target_id, presence, msg):
+                await self._sync_direct_to_firebase(target_id, msg)
                 return True
 
         return await self._send_direct_via_firebase(target_id, msg)

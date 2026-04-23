@@ -1,4 +1,4 @@
-# Hermes v0.2.1
+# Hermes v0.3.0
 
 A terminal-first P2P chat application with local relay server, direct peer messaging, Firebase fallback, and WebSocket support.
 
@@ -7,7 +7,7 @@ A terminal-first P2P chat application with local relay server, direct peer messa
 Download the bundle from releases, extract it, and run:
 
 ```
-./start.sh
+./hermes
 ```
 
 Or install from source:
@@ -46,6 +46,14 @@ cd hermes
 
 ## Install
 
+No venv (system Python):
+
+```
+python3 -m pip install --user .
+```
+
+With venv:
+
 ```
 python3 -m venv .venv
 source .venv/bin/activate
@@ -56,9 +64,9 @@ pip install websockets>=10.0
 ## Run
 
 ```
-hermes                      # Terminal client
-hermes-server --port 7777   # Relay server
-web-ui --port 8080          # Web UI
+./hermes                    # Terminal client (single command, no manual venv activation)
+./hermes server --port 7777 # Relay server
+./hermes web --port 8080    # Web UI
 ```
 
 ## Distribution
@@ -69,7 +77,7 @@ Create a distributable bundle:
 python3 scripts/create_bundle.py --format both
 ```
 
-This creates hermes-0.2.1-bundle.zip and hermes-0.2.1-bundle.tar.gz
+This creates hermes-0.3.0-bundle.zip and hermes-0.3.0-bundle.tar.gz
 
 ## Firebase Setup
 

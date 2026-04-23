@@ -6,8 +6,9 @@ import asyncio
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Any
+import logging
 
-VERSION = "0.2.1"
+VERSION = "0.3.0"
 
 
 @dataclass
@@ -34,6 +35,11 @@ class ChatUI:
         self._lock = threading.Lock()
         self._dirty = threading.Event()
         self._running = True
+        self.stdscr = None
+        self.refresh_interval = 0.5
+        self._sync_check_interval = 2.0
+        self._last_sync_check = 0.0
+        self._sync_gap = 0
 
     def _normalize_ts(self, raw_ts: Any) -> float:
         try:
@@ -47,28 +53,36 @@ class ChatUI:
         return ts
 
     def init_colors(self):
+        use_default = False
         try:
             curses.use_default_colors()
+            use_default = True
         except:
             pass
 
-        curses.init_pair(1, curses.COLOR_WHITE, -1)
-        curses.init_pair(2, curses.COLOR_WHITE, -1)
-        if curses.COLORS >= 16:
-            curses.init_pair(2, 15, -1)
+        bg = -1 if use_default else curses.COLOR_BLACK
+        
+        def safe_init(pair, fg, bg):
+            try:
+                curses.init_pair(pair, fg, bg)
+            except:
+                pass
 
-        curses.init_pair(3, curses.COLOR_GREEN, -1)
-        curses.init_pair(4, curses.COLOR_WHITE, -1)
-        curses.init_pair(5, curses.COLOR_MAGENTA, -1)
-        curses.init_pair(6, curses.COLOR_WHITE, -1)
-        curses.init_pair(7, curses.COLOR_WHITE, -1)
-        curses.init_pair(8, curses.COLOR_WHITE, -1)
-        curses.init_pair(9, curses.COLOR_GREEN, -1)
-        curses.init_pair(10, curses.COLOR_WHITE, -1)
-        curses.init_pair(11, curses.COLOR_WHITE, -1)
-        curses.init_pair(12, curses.COLOR_CYAN, -1)
+        safe_init(1, curses.COLOR_WHITE, bg)    # base text
+        safe_init(2, curses.COLOR_WHITE, bg)    # input text
+        safe_init(3, curses.COLOR_CYAN, bg)     # accent
+        safe_init(4, curses.COLOR_WHITE, bg)    # peer sender
+        safe_init(5, curses.COLOR_CYAN, bg)     # own sender
+        safe_init(6, curses.COLOR_YELLOW, bg)   # sending
+        safe_init(7, curses.COLOR_RED, bg)      # failed
+        safe_init(8, curses.COLOR_BLUE, bg)     # enc tag
+        safe_init(9, curses.COLOR_CYAN, bg)     # header
+        safe_init(10, curses.COLOR_WHITE, bg)   # muted
+        safe_init(11, curses.COLOR_WHITE, bg)   # title
+        safe_init(12, curses.COLOR_CYAN, bg)    # date separator
 
     def push_message(self, msg: dict):
+        logging.debug(f"push_message: {msg}")
         with self._lock:
             existing = None
             if msg.get("id"):
@@ -76,14 +90,25 @@ class ChatUI:
                     if m.get("id") == msg["id"]:
                         existing = m
                         break
-
             if existing:
                 existing.update(msg)
+                self.messages.sort(key=self._message_sort_key)
             else:
                 self.messages.append(msg)
+                self.messages.sort(key=self._message_sort_key)
                 if len(self.messages) > 2000:
                     self.messages.pop(0)
         self._dirty.set()
+
+    def force_redraw(self):
+        self._dirty.set()
+
+    def _message_sort_key(self, msg: dict):
+        seq = msg.get("_seq")
+        ts = self._normalize_ts(msg.get("ts", 0))
+        if isinstance(seq, int):
+            return (ts, seq)
+        return (ts, 0)
 
     def update_peers(self, peers: list):
         with self._lock:
@@ -164,6 +189,12 @@ class ChatUI:
                     return
             if self.engine and self.engine.loop:
                 asyncio.run_coroutine_threadsafe(
+                    self.engine.transport.load_more(
+                        self.active_channel, limit=self.auto_load_limit
+                    ),
+                    self.engine.loop,
+                )
+                asyncio.run_coroutine_threadsafe(
                     self.engine.transport.load_new_messages(
                         self.active_channel, limit=self.auto_load_limit
                     ),
@@ -198,6 +229,7 @@ class ChatUI:
             )
         elif cmd == "/status":
             s = self.engine.transport.status
+            sync = self.engine.transport.get_sync_status(self.active_channel)
             self.push_message(
                 {
                     "type": "system",
@@ -205,7 +237,8 @@ class ChatUI:
                         f"P2P Status: {s.get('ip')}:{s.get('port')} "
                         f"(udp:{s.get('udp_port')}) "
                         f"| last={s.get('last_transport')} "
-                        f"| fb={self.engine.transport.fb.db_url}"
+                        f"| fb={self.engine.transport.fb.db_url} "
+                        f"| seen={sync.get('seen_count')} remote={sync.get('remote_count')} gap={sync.get('gap')}"
                     ),
                     "ts": time.time(),
                 }
@@ -616,6 +649,7 @@ class ChatUI:
                         "channel": self.active_channel if is_channel else None,
                         "to": None if is_channel else self.active_channel,
                         "enc": "none",
+                        "_seq": 2_000_000_000,
                     }
                     self.push_message(msg)
                     if self.engine and self.engine.loop:
@@ -633,9 +667,8 @@ class ChatUI:
                                 ),
                                 self.engine.loop,
                             )
-                self.input_buf = ""
-                self.input_cursor = 0
-                self.scroll_offset = 0
+            self.input_buf = ""
+            self.input_cursor = 0
         elif 32 <= key <= 126:
             char = chr(key)
             self.input_buf = (
@@ -644,47 +677,43 @@ class ChatUI:
                 + self.input_buf[self.input_cursor :]
             )
             self.input_cursor += 1
+        self._dirty.set()
 
     def redraw(self, stdscr):
         H, W = stdscr.getmaxyx()
         stdscr.erase()
 
-        header_left = self.active_channel[: W - 30]
-        stdscr.addstr(0, 0, header_left, curses.color_pair(11) | curses.A_BOLD)
+        if H < 8 or W < 40:
+            stdscr.addstr(0, 0, "Hermes", curses.color_pair(11) | curses.A_BOLD)
+            stdscr.addstr(1, 0, "Window too small. Resize to continue.", curses.color_pair(1))
+            stdscr.refresh()
+            return
 
-        version_str = f" v{VERSION}"
+        header_left = f"Hermes v{VERSION} | {self.active_channel}"
+        stdscr.addstr(0, 0, header_left[: W - 1], curses.color_pair(11) | curses.A_BOLD)
+
         s = self.engine.transport.status
-        p2p_part = (
-            f"p2p {s.get('ip')}:{s.get('port')}" if s.get("port") else "p2p offline"
-        )
-        mode_str = f"{p2p_part} | fb | {getattr(self.config.crypto, 'default_mode', 'none')}{version_str}"
-        if len(mode_str) < W - 2:
-            stdscr.addstr(0, W - len(mode_str) - 1, mode_str, curses.color_pair(1))
+        online_count = sum(1 for p in self.peers if p.online)
+        right_status = f"online:{online_count}"
+        if self._sync_gap > 0:
+            right_status += f" sync:+{self._sync_gap}"
+        if W - len(right_status) - 1 > len(header_left) + 1:
+            stdscr.addstr(0, W - len(right_status) - 1, right_status, curses.color_pair(3))
 
-        x = 0
-        with self._lock:
-            for peer in self.peers:
-                if x + len(peer.name) + 4 >= W:
-                    break
-                stdscr.addstr(
-                    1,
-                    x,
-                    "* ",
-                    curses.color_pair(9) if peer.online else curses.color_pair(10),
-                )
-                stdscr.addstr(
-                    1,
-                    x + 2,
-                    peer.name + "  ",
-                    curses.color_pair(3) if peer.online else curses.color_pair(4),
-                )
-                x += len(peer.name) + 4
+        enc_mode = getattr(self.config.crypto, 'default_mode', 'none')
+        meta = (
+            f"net:{s.get('last_transport') or '-'} "
+            f"tcp:{s.get('port') or '-'} "
+            f"udp:{s.get('udp_port') or '-'} "
+            f"enc:{enc_mode}"
+        )
+        stdscr.addstr(1, 0, meta[: W - 1], curses.color_pair(10))
 
         line = "-" * (W - 1)
-        stdscr.addstr(2, 0, line, curses.color_pair(1))
-        stdscr.addstr(H - 2, 0, line, curses.color_pair(1))
+        stdscr.addstr(2, 0, line, curses.color_pair(10))
+        stdscr.addstr(H - 2, 0, line, curses.color_pair(10))
 
-        prefix = f"{self.active_channel} > "
+        prefix = "> "
         stdscr.addstr(H - 1, 0, prefix[: W - 1], curses.color_pair(1))
         stdscr.addstr(
             H - 1,
@@ -693,7 +722,7 @@ class ChatUI:
             curses.color_pair(2),
         )
         if W > 40:
-            stdscr.addstr(H - 1, W - 6, "/help", curses.color_pair(1))
+            stdscr.addstr(H - 1, W - 14, "Enter | /help", curses.color_pair(10))
 
         msg_rows = H - 5
         if msg_rows > 0:
@@ -714,19 +743,28 @@ class ChatUI:
                     ):
                         display_msgs.append(m)
 
-                start_idx = max(0, len(display_msgs) - msg_rows - self.scroll_offset)
-                end_idx = len(display_msgs) - self.scroll_offset
-                visible = display_msgs[start_idx:end_idx] if end_idx > 0 else []
-
                 curr_row = 3
                 prev_date = None
-                for msg in visible:
+                line_items: list[tuple[str, Any]] = []
+                for msg in display_msgs:
                     if curr_row > H - 3:
                         break
                     msg_ts = self._normalize_ts(msg.get("ts", time.time()))
                     msg_date = datetime.fromtimestamp(msg_ts).date()
                     if msg_date != prev_date:
-                        label = msg_date.strftime("  %A, %d %b  ")
+                        line_items.append(("date", msg_date))
+                        prev_date = msg_date
+                    line_items.append(("msg", msg))
+
+                end_idx = len(line_items) - self.scroll_offset
+                start_idx = max(0, end_idx - msg_rows)
+                visible = line_items[start_idx:end_idx] if end_idx > 0 else []
+
+                for kind, payload in visible:
+                    if curr_row > H - 3:
+                        break
+                    if kind == "date":
+                        label = payload.strftime("  %A, %d %b  ")
                         if len(label) < W:
                             stdscr.addstr(
                                 curr_row,
@@ -734,11 +772,13 @@ class ChatUI:
                                 label,
                                 curses.color_pair(12),
                             )
-                            curr_row += 1
-                        prev_date = msg_date
+                        curr_row += 1
+                        continue
 
                     if curr_row > H - 3:
                         break
+                    msg = payload
+                    msg_ts = self._normalize_ts(msg.get("ts", time.time()))
                     stdscr.addstr(
                         curr_row,
                         0,
@@ -747,31 +787,22 @@ class ChatUI:
                     )
 
                     if msg.get("type") == "system":
-                        stdscr.addstr(curr_row, 6, "- ".ljust(10), curses.color_pair(1))
+                        stdscr.addstr(curr_row, 6, "system".ljust(12), curses.color_pair(10))
                         stdscr.addstr(
                             curr_row,
-                            16,
+                            19,
                             str(msg.get("body", ""))[: W - 26],
-                            curses.color_pair(1) | curses.A_ITALIC,
+                            curses.color_pair(10),
                         )
                     else:
                         is_me = msg.get("from_id") == self.identity.peer_id
-                        color = (
-                            curses.color_pair(5)
-                            if is_me
-                            else (
-                                curses.color_pair(3)
-                                if any(
-                                    p.id == msg.get("from_id") and p.online
-                                    for p in self.peers
-                                )
-                                else curses.color_pair(4)
-                            )
-                        )
+                        color = curses.color_pair(5) if is_me else curses.color_pair(4)
+                        sender = str(msg.get("from_name", "unknown"))[:11]
+                        sender = f"{sender}{'*' if is_me else ''}"
                         stdscr.addstr(
                             curr_row,
                             6,
-                            str(msg.get("from_name", "unknown"))[:10].ljust(10),
+                            sender.ljust(12),
                             color,
                         )
 
@@ -787,7 +818,7 @@ class ChatUI:
 
                         stdscr.addstr(
                             curr_row,
-                            16,
+                            19,
                             (str(msg.get("body", "")) + suffix)[: W - 26],
                             attr,
                         )
@@ -806,12 +837,16 @@ class ChatUI:
         stdscr.refresh()
 
     def _main(self, stdscr):
+        self.stdscr = stdscr
         self.init_colors()
-        curses.curs_set(1)
+        try:
+            curses.curs_set(1)
+        except curses.error:
+            pass
         stdscr.nodelay(True)
         stdscr.keypad(True)
         last_redraw = 0
-        redraw_interval = 0.05
+        redraw_interval = self.refresh_interval
         while self._running:
             now = time.time()
             should_redraw = self._dirty.is_set() or (
@@ -835,39 +870,76 @@ class ChatUI:
                 stdscr.erase()
             else:
                 self.handle_key(key)
-            try:
-                self.redraw(stdscr)
-            except curses.error:
-                pass
             last_redraw = time.time()
 
     def _auto_loader_loop(self):
+        last_presence_check = 0
+        presence_interval = 10.0
+        last_load_check = 0.0
         while self._running:
-            if (
-                self.auto_load_enabled
-                and self.engine
-                and self.engine.loop
-                and self.active_channel
-            ):
-                try:
-                    asyncio.run_coroutine_threadsafe(
-                        self.engine.transport.load_new_messages(
-                            self.active_channel, limit=self.auto_load_limit
-                        ),
-                        self.engine.loop,
-                    )
-                except Exception:
-                    pass
-            time.sleep(1.0)
+            try:
+                now = time.time()
+                if (
+                    self.auto_load_enabled
+                    and self.engine
+                    and self.engine.loop
+                    and self.active_channel
+                    and (now - last_load_check) >= self.refresh_interval
+                ):
+                    last_load_check = now
+                    try:
+                        asyncio.run_coroutine_threadsafe(
+                            self.engine.transport.load_new_messages(
+                                self.active_channel, limit=self.auto_load_limit
+                            ),
+                            self.engine.loop,
+                        )
+                    except Exception:
+                        pass
+
+                if now - self._last_sync_check >= self._sync_check_interval:
+                    self._last_sync_check = now
+                    try:
+                        sync = self.engine.transport.get_sync_status(self.active_channel)
+                        gap = int(sync.get("gap") or 0)
+                        self._sync_gap = gap
+                        if gap > 0 and self.engine and self.engine.loop:
+                            asyncio.run_coroutine_threadsafe(
+                                self.engine.transport.load_new_messages(
+                                    self.active_channel,
+                                    limit=max(self.auto_load_limit, min(gap * 2, 500)),
+                                ),
+                                self.engine.loop,
+                            )
+                    except Exception:
+                        pass
+
+                if now - last_presence_check >= presence_interval:
+                    last_presence_check = now
+                    if self.engine and self.engine.loop:
+                        try:
+                            asyncio.run_coroutine_threadsafe(
+                                self.engine.transport.update_presence(),
+                                self.engine.loop,
+                            )
+                        except Exception:
+                            pass
+                        peers = self.engine.transport.list_online_peers()
+                        self.update_peers(peers)
+            except Exception:
+                pass
+            time.sleep(0.1)
 
     def run(self):
         self._loader_thread = threading.Thread(
             target=self._auto_loader_loop, daemon=True
         )
         self._loader_thread.start()
+        self._running = True
         try:
             curses.wrapper(self._main)
         except KeyboardInterrupt:
             pass
         finally:
             self._running = False
+            self.stdscr = None

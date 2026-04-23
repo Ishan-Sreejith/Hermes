@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
+import socket
+import subprocess
 import threading
 import time
 from collections import deque
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request, send_from_directory
 
 from ..config import ConfigManager
 from ..protocol import read_message, write_message
@@ -71,6 +74,69 @@ def _current_config() -> dict:
     }
 
 
+def _tcp_ping(host: str, port: int, timeout_s: float = 2.0) -> dict:
+    started = time.perf_counter()
+    try:
+        sock = socket.create_connection((host, int(port)), timeout=timeout_s)
+        sock.close()
+        elapsed = int((time.perf_counter() - started) * 1000)
+        return {"ok": True, "host": host, "port": int(port), "latency_ms": elapsed}
+    except Exception as e:
+        elapsed = int((time.perf_counter() - started) * 1000)
+        return {"ok": False, "host": host, "port": int(port), "latency_ms": elapsed, "error": str(e)}
+
+
+def _resolve_host(host: str) -> dict:
+    started = time.perf_counter()
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        addrs = sorted({item[4][0] for item in infos if item and item[4]})
+        elapsed = int((time.perf_counter() - started) * 1000)
+        if not addrs:
+            return {"ok": False, "host": host, "latency_ms": elapsed, "error": "no address found"}
+        return {"ok": True, "host": host, "latency_ms": elapsed, "addresses": addrs}
+    except Exception as e:
+        elapsed = int((time.perf_counter() - started) * 1000)
+        return {"ok": False, "host": host, "latency_ms": elapsed, "error": str(e)}
+
+
+def _scan_common_ports(host: str) -> dict:
+    ports = [22, 53, 80, 123, 135, 139, 443, 445, 3306, 3389, 5432, 6379, 8080]
+    started = time.perf_counter()
+    open_ports = []
+    for p in ports:
+        res = _tcp_ping(host, p, timeout_s=0.35)
+        if res.get("ok"):
+            open_ports.append({"port": p, "latency_ms": int(res.get("latency_ms") or 0)})
+    elapsed = int((time.perf_counter() - started) * 1000)
+    return {"ok": True, "host": host, "elapsed_ms": elapsed, "checked": len(ports), "open_ports": open_ports}
+
+
+def _list_lan_devices() -> dict:
+    try:
+        out = subprocess.run(["arp", "-a"], capture_output=True, text=True, timeout=8)
+        if out.returncode != 0 and out.stderr:
+            raise RuntimeError(out.stderr.strip())
+        output = out.stdout or ""
+    except Exception as e:
+        return {"ok": False, "error": str(e), "devices": []}
+
+    devices = []
+    for line in output.splitlines():
+        if "(" not in line or ") at " not in line:
+            continue
+        try:
+            host = line.split("(", 1)[0].strip() or "unknown"
+            ip = line.split("(", 1)[1].split(")", 1)[0].strip()
+            mac = line.split(") at ", 1)[1].split(" ", 1)[0].strip()
+        except Exception:
+            continue
+        devices.append({"host": host, "ip": ip, "mac": mac})
+
+    devices.sort(key=lambda x: x.get("ip") or "")
+    return {"ok": True, "count": len(devices), "devices": devices}
+
+
 async def hermes_receive_loop():
     global hermes_reader, hermes_writer
     try:
@@ -112,7 +178,6 @@ async def connect_hermes():
             {
                 "type": "register",
                 "peer_id": client_peer_id,
-                # Aligning with @ prefix for groups/channels
                 "channels": ["@broadcast", "@dev"],
             },
         )
@@ -130,6 +195,24 @@ async def connect_hermes():
 @app.get("/")
 def index():
     return render_template("index.html")
+
+
+@app.get("/app.js")
+def app_js():
+    return send_from_directory(app.static_folder, "app.js")
+
+
+@app.get("/firebase-config.js")
+def firebase_config_js():
+    cfg = _current_config()
+    firebase_web = cfg.get("firebase_web") or {}
+    cloud = cfg.get("cloud") or {}
+    body = (
+        "window.HERMES_FIREBASE_CONFIG = "
+        + json.dumps({"firebase_web": firebase_web, "cloud": cloud}, separators=(",", ":"))
+        + ";"
+    )
+    return Response(body, mimetype="application/javascript")
 
 
 @app.get("/firebase-config")
@@ -157,7 +240,6 @@ def send():
         return jsonify({"ok": False, "error": "empty message"}), 400
 
     to_target = str(payload.get("to") or "*")
-    # Ensure targets starting with @ are handled correctly
     channel = payload.get("channel")
     if to_target.startswith("@"):
         channel = to_target
@@ -236,6 +318,40 @@ def web_config():
     return jsonify(_current_config())
 
 
+@app.get("/api/net/ping")
+def api_net_ping():
+    host = str(request.args.get("host") or "").strip()
+    port_raw = str(request.args.get("port") or "80").strip()
+    if not host:
+        return jsonify({"ok": False, "error": "host is required"}), 400
+    try:
+        port = int(port_raw)
+    except ValueError:
+        return jsonify({"ok": False, "error": "invalid port"}), 400
+    return jsonify(_tcp_ping(host, port))
+
+
+@app.get("/api/net/resolve")
+def api_net_resolve():
+    host = str(request.args.get("host") or "").strip()
+    if not host:
+        return jsonify({"ok": False, "error": "host is required"}), 400
+    return jsonify(_resolve_host(host))
+
+
+@app.get("/api/net/scan")
+def api_net_scan():
+    host = str(request.args.get("host") or "").strip()
+    if not host:
+        return jsonify({"ok": False, "error": "host is required"}), 400
+    return jsonify(_scan_common_ports(host))
+
+
+@app.get("/api/net/lan")
+def api_net_lan():
+    return jsonify(_list_lan_devices())
+
+
 def run_asyncio_loop(loop_obj: asyncio.AbstractEventLoop):
     global loop
     loop = loop_obj
@@ -265,8 +381,6 @@ def main():
     event_loop = asyncio.new_event_loop()
     loop_thread = threading.Thread(target=run_asyncio_loop, args=(event_loop,), daemon=True)
     loop_thread.start()
-
-    # Web terminal mode is Firebase-only; no Hermes socket bootstrap.
 
     app.run(host="127.0.0.1", port=args.port, debug=False, threaded=True)
 

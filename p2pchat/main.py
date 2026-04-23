@@ -205,7 +205,8 @@ class CLIApp:
                 return
             print("Invalid menu option.")
 
-    async def initialize(self):
+    async def pre_connect(self):
+        """Phase 1 blocking I/O before the background loop."""
         print("\n--- Hermes Messenger ---")
         u = input("Username: ").strip()
         p = getpass.getpass("Password: ").strip()
@@ -223,15 +224,17 @@ class CLIApp:
         self.identity.username = res["username"]
         print(f"Connected as {u} ({self.identity.peer_id})")
 
-        self.transport.update_presence()
+        return await self.startup_menu()
 
-        initial_channel = await self.startup_menu()
+    async def post_connect(self, loop, initial_channel: str):
+        """Phase 2 runs inside run_forever."""
+        self.engine.set_loop(loop)
+        self.transport.update_presence()
         await self.transport.start_personal_inbox_listener()
         await self.engine.join_channel(initial_channel)
         self.ui.active_channel = initial_channel
+        self.ui._dirty.set()  # trigger first redraw
 
-    async def start_engine(self, loop):
-        self.engine.set_loop(loop)
         while True:
             try:
                 self.transport.update_presence()
@@ -240,8 +243,11 @@ class CLIApp:
             await asyncio.sleep(60)
 
     def run(self):
+        setup_loop = asyncio.new_event_loop()
+        initial_channel = setup_loop.run_until_complete(self.pre_connect())
+        setup_loop.close()
+
         loop = asyncio.new_event_loop()
-        loop.run_until_complete(self.initialize())
 
         def run_loop(l):
             asyncio.set_event_loop(l)
@@ -250,7 +256,9 @@ class CLIApp:
         t = threading.Thread(target=run_loop, args=(loop,), daemon=True)
         t.start()
 
-        asyncio.run_coroutine_threadsafe(self.start_engine(loop), loop)
+        import time as _time
+        _time.sleep(0.05)
+        asyncio.run_coroutine_threadsafe(self.post_connect(loop, initial_channel), loop)
 
         self.ui.run()
 
@@ -258,14 +266,34 @@ class CLIApp:
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Hermes - Terminal P2P Messenger v" + __import__('p2pchat.ui', fromlist=['VERSION']).VERSION
+    )
     parser.add_argument(
         "--listen-port",
         type=int,
         default=None,
-        help="Bind direct listener to this port (default: auto)",
+        metavar="PORT",
+        help="Bind direct P2P listener to this port (default: auto)",
+    )
+    parser.add_argument(
+        "--tui",
+        action="store_true",
+        help="Launch optional Textual TUI (requires textual package)",
     )
     args = parser.parse_args()
+
+    if args.tui:
+        try:
+            from .tui import run_textual_tui
+            run_textual_tui(listen_port=args.listen_port)
+            return
+        except ModuleNotFoundError as exc:
+            if exc.name == "textual":
+                print("[hermes] Textual is not installed. Install with: pip install textual")
+                print("[hermes] Falling back to CLI...")
+            else:
+                raise
 
     try:
         app = CLIApp(listen_port=args.listen_port)

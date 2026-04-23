@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ -x "$ROOT_DIR/.venv/bin/hermes" ]; then
+  exec "$ROOT_DIR/.venv/bin/hermes" "$@"
+fi
+
+if [ -x "$ROOT_DIR/venv/bin/hermes" ]; then
+  exec "$ROOT_DIR/venv/bin/hermes" "$@"
+fi
+
+exec python3 -m p2pchat.main "$@"
