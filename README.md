@@ -40,6 +40,24 @@ hermes-server --port 7777
 web-ui --port 8080
 ```
 
+## Production Notes
+
+- `web-ui` now defaults to `127.0.0.1` with debug mode disabled.
+- `hermes-server` now defaults to `127.0.0.1`.
+- Web UI health endpoint: `GET /healthz`
+
+If you need public exposure, bind explicitly and run behind a reverse proxy:
+
+```bash
+hermes-server --host 0.0.0.0 --port 7777
+web-ui --host 0.0.0.0 --port 8080
+```
+
+Optional runtime controls:
+
+- `HERMES_WEB_DEBUG=1` to enable Flask debug mode (development only)
+- `HERMES_LOG_LEVEL=DEBUG|INFO|WARNING|ERROR` for relay server logging
+
 ## Firebase setup
 
 Edit `~/.p2pchat/config.json`:

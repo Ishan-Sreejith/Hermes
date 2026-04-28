@@ -3,11 +3,12 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Hermes Cloud</title>
+    <title>Hermes Web</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%233a8bfd'/%3E%3Cpath d='M20 35h60v10H20zM20 55h40v10H20z' fill='%23ffffff'/%3E%3C/svg%3E" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
     <style>
@@ -21,7 +22,6 @@
         --accent: #3a8bfd;
         --accent-2: #53a4ff;
         --danger: #f05a6c;
-        --ok: #2fcf8f;
       }
       :root[data-theme='light'] {
         --bg: #f4f7fc;
@@ -33,183 +33,49 @@
         --accent: #2563eb;
         --accent-2: #3b82f6;
         --danger: #dc3545;
-        --ok: #0d9f6e;
       }
-      * {
-        box-sizing: border-box;
-      }
-      html,
-      body {
-        margin: 0;
-        height: 100%;
-        font-family: 'Plus Jakarta Sans', sans-serif;
-        background: radial-gradient(circle at top right, #192436 0%, var(--bg) 40%);
-        color: var(--text);
-      }
-      .app {
-        display: grid;
-        grid-template-columns: 320px 1fr;
-        height: 100vh;
-      }
-      .sidebar {
-        background: color-mix(in oklab, var(--surface) 92%, transparent);
-        border-right: 1px solid var(--border);
-        display: flex;
-        flex-direction: column;
-      }
-      .sidebar-header {
-        padding: 20px;
-        border-bottom: 1px solid var(--border);
-      }
-      .sidebar-title {
-        font-size: 24px;
-        font-weight: 800;
-      }
-      .status {
-        color: var(--muted);
-        font-family: 'JetBrains Mono', monospace;
-        font-size: 12px;
-      }
-      .toolbar {
-        padding: 12px 16px;
-        display: flex;
-        gap: 8px;
-        border-bottom: 1px solid var(--border);
-      }
-      .btn {
-        border: 1px solid var(--border);
-        background: var(--surface-2);
-        color: var(--text);
-        border-radius: 10px;
-        padding: 9px 12px;
-        font-size: 13px;
-        font-weight: 700;
-        cursor: pointer;
-      }
-      .btn:hover {
-        border-color: var(--accent);
-      }
-      .btn-danger {
-        border-color: color-mix(in oklab, var(--danger) 40%, var(--border));
-      }
-      .chat-list {
-        overflow: auto;
-        padding: 10px;
-      }
-      .chat-card {
-        border: 1px solid transparent;
-        background: transparent;
-        border-radius: 12px;
-        padding: 12px;
-        margin-bottom: 8px;
-        cursor: pointer;
-      }
-      .chat-card:hover {
-        background: var(--surface-2);
-      }
-      .chat-card.active {
-        border-color: var(--accent);
-        background: color-mix(in oklab, var(--accent) 12%, var(--surface-2));
-      }
-      .main {
-        display: grid;
-        grid-template-rows: 68px 1fr 76px;
-      }
-      .chat-header {
-        padding: 0 20px;
-        border-bottom: 1px solid var(--border);
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        background: color-mix(in oklab, var(--surface) 92%, transparent);
-      }
-      .header-actions {
-        display: flex;
-        gap: 8px;
-      }
-      .messages {
-        overflow: auto;
-        padding: 18px;
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-      }
-      .msg {
-        max-width: 70%;
-        border-radius: 14px;
-        padding: 10px 12px;
-        background: var(--surface-2);
-      }
-      .msg.me {
-        align-self: end;
-        background: linear-gradient(135deg, var(--accent), var(--accent-2));
-        color: white;
-      }
-      .meta {
-        font-size: 11px;
-        color: var(--muted);
-      }
-      .composer {
-        border-top: 1px solid var(--border);
-        display: flex;
-        gap: 10px;
-        padding: 14px 16px;
-        background: var(--surface);
-      }
-      #message-input {
-        flex: 1;
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        background: var(--bg);
-        color: var(--text);
-        padding: 12px;
-        font-size: 14px;
-      }
-      .modal {
-        position: fixed;
-        inset: 0;
-        display: none;
-        align-items: center;
-        justify-content: center;
-        background: rgba(0, 0, 0, 0.6);
-      }
-      .modal.open {
-        display: flex;
-      }
-      .modal-card {
-        width: min(440px, 92vw);
-        background: var(--surface);
-        border: 1px solid var(--border);
-        border-radius: 16px;
-        padding: 16px;
-      }
-      .modal-card h3 {
-        margin: 0 0 10px;
-      }
-      .field {
-        margin: 10px 0;
-      }
-      .field input {
-        width: 100%;
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        padding: 10px;
-        background: var(--bg);
-        color: var(--text);
-      }
-      .modal-actions {
-        margin-top: 14px;
-        display: flex;
-        justify-content: flex-end;
-        gap: 8px;
-      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; font-family: 'Plus Jakarta Sans', sans-serif; background: var(--bg); color: var(--text); }
+      .app { display: grid; grid-template-columns: 320px 1fr; height: 100vh; }
+      .sidebar { background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+      .sidebar.open { display: flex; }
+      .sidebar-header { padding: 20px; border-bottom: 1px solid var(--border); }
+      .sidebar-title { font-size: 24px; font-weight: 800; }
+      .status { color: var(--muted); font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+      .status.good { color: #45d483; }
+      .status.bad { color: var(--danger); }
+      .toolbar { padding: 12px 16px; display: flex; gap: 8px; border-bottom: 1px solid var(--border); }
+      .btn { border: 1px solid var(--border); background: var(--surface-2); color: var(--text); border-radius: 10px; padding: 9px 12px; font-size: 13px; font-weight: 700; cursor: pointer; }
+      .btn:hover { border-color: var(--accent); }
+      .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+      .btn-danger { border-color: color-mix(in oklab, var(--danger) 40%, var(--border)); }
+      .chat-list { overflow: auto; padding: 10px; }
+      .chat-card { border: 1px solid transparent; border-radius: 12px; padding: 12px; margin-bottom: 8px; cursor: pointer; }
+      .chat-card:hover { background: var(--surface-2); }
+      .chat-card.active { border-color: var(--accent); background: color-mix(in oklab, var(--accent) 12%, var(--surface-2)); }
+      .main { display: grid; grid-template-rows: 68px 1fr 76px; }
+      .chat-header { padding: 0 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; background: var(--surface); }
+      .chat-header-left { display: flex; align-items: center; gap: 10px; }
+      .messages { overflow: auto; padding: 18px; display: flex; flex-direction: column; gap: 8px; }
+      .msg { max-width: 70%; border-radius: 14px; padding: 10px 12px; background: var(--surface-2); }
+      .msg.me { align-self: end; background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: white; }
+      .meta { font-size: 11px; color: var(--muted); }
+      .top-banner { display: none; padding: 10px 14px; font-size: 12px; border-bottom: 1px solid var(--border); color: #fff; background: #913640; }
+      .top-banner.open { display: block; }
+      .composer { border-top: 1px solid var(--border); display: flex; gap: 10px; padding: 14px 16px; background: var(--surface); }
+      #message-input { flex: 1; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); color: var(--text); padding: 12px; font-size: 14px; }
+      #sidebar-toggle { display: none; }
+      .badge { margin-left: 6px; font-size: 10px; background: var(--danger); color: #fff; border-radius: 999px; padding: 1px 6px; }
+      .modal { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0, 0, 0, 0.6); }
+      .modal.open { display: flex; }
+      .modal-card { width: min(440px, 92vw); background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 16px; }
+      .field { margin: 10px 0; }
+      .field input { width: 100%; border: 1px solid var(--border); border-radius: 10px; padding: 10px; background: var(--bg); color: var(--text); }
+      .modal-actions { margin-top: 14px; display: flex; justify-content: flex-end; gap: 8px; }
       @media (max-width: 860px) {
-        .app {
-          grid-template-columns: 1fr;
-        }
-        .sidebar {
-          display: none;
-        }
+        .app { grid-template-columns: 1fr; }
+        .sidebar { display: none; position: fixed; inset: 0 auto 0 0; width: min(92vw, 340px); z-index: 30; box-shadow: 0 0 0 100vmax rgba(0,0,0,0.45); }
+        #sidebar-toggle { display: inline-flex; }
       }
     </style>
   </head>
@@ -230,18 +96,20 @@
 
       <main class="main">
         <header class="chat-header">
-          <div>
+          <div class="chat-header-left">
+            <button class="btn" id="sidebar-toggle">Channels</button>
+            <div>
             <div id="chat-title">@broadcast</div>
             <div class="meta" id="transport-info">Cloud Relay</div>
+            </div>
           </div>
-          <div class="header-actions">
-            <button class="btn" id="btn-theme">Theme</button>
-          </div>
+          <button class="btn" id="btn-theme">Theme</button>
         </header>
+        <div class="top-banner" id="error-banner"></div>
         <section class="messages" id="chat-messages"></section>
         <footer class="composer">
-          <input id="message-input" placeholder="Type message..." />
-          <button class="btn" id="send-btn">Send</button>
+          <input id="message-input" placeholder="Type message..." maxlength="800" />
+          <button class="btn" id="send-btn" disabled>Send</button>
         </footer>
       </main>
     </div>
@@ -249,10 +117,9 @@
     <div class="modal" id="settings-overlay">
       <div class="modal-card">
         <h3>Welcome</h3>
-        <div class="field">
-          <input id="settings-name" placeholder="Username" maxlength="20" />
-        </div>
+        <div class="field"><input id="settings-name" placeholder="Username" maxlength="20" /></div>
         <div class="modal-actions">
+          <button class="btn" id="settings-cancel">Skip</button>
           <button class="btn" id="settings-save">Enter</button>
         </div>
       </div>
@@ -260,7 +127,7 @@
 
     <div class="modal" id="chat-modal">
       <div class="modal-card">
-        <h3 id="chat-modal-title">Create Chat</h3>
+        <h3 id="chat-modal-title">Create Channel</h3>
         <div class="field"><input id="chat-modal-name" placeholder="@team" /></div>
         <div class="field" id="chat-modal-new-wrap" style="display:none"><input id="chat-modal-new-name" placeholder="@new-team" /></div>
         <div class="modal-actions">
