@@ -1,10 +1,13 @@
 {
   "rules": {
-    ".read": false,
-    ".write": false,
+    ".read": true,
+    ".write": true,
     "rooms": {
       ".read": true,
-      ".write": true
+      ".write": true,
+      "$room": {
+        ".validate": "newData.isString() || newData.hasChildren(['created_at']) || !newData.exists()"
+      }
     },
     "presence": {
       ".read": true,
@@ -26,6 +29,10 @@
           ".write": "true"
         }
       }
+    },
+    "signaling": {
+      ".read": true,
+      ".write": true
     }
   }
 }

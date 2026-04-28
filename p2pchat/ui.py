@@ -41,6 +41,21 @@ class ChatUI:
         self._last_sync_check = 0.0
         self._sync_gap = 0
 
+    def _resolve_direct_target(self, target: str) -> str:
+        raw = str(target or "").strip()
+        if (
+            not raw.startswith("@")
+            and self.engine
+            and getattr(self.engine, "transport", None)
+        ):
+            resolver = getattr(self.engine.transport, "resolve_direct_target", None)
+            if callable(resolver):
+                try:
+                    return str(resolver(raw) or raw)
+                except Exception:
+                    return raw
+        return raw
+
     def _normalize_ts(self, raw_ts: Any) -> float:
         try:
             ts = float(raw_ts)
@@ -57,29 +72,32 @@ class ChatUI:
         try:
             curses.use_default_colors()
             use_default = True
-        except:
+        except curses.error:
             pass
 
         bg = -1 if use_default else curses.COLOR_BLACK
-        
-        def safe_init(pair, fg, bg):
+
+        def safe_init(pair, fg, bg_val):
             try:
-                curses.init_pair(pair, fg, bg)
-            except:
+                curses.init_pair(pair, fg, bg_val)
+            except curses.error:
                 pass
 
-        safe_init(1, curses.COLOR_WHITE, bg)    # base text
-        safe_init(2, curses.COLOR_WHITE, bg)    # input text
-        safe_init(3, curses.COLOR_CYAN, bg)     # accent
-        safe_init(4, curses.COLOR_WHITE, bg)    # peer sender
-        safe_init(5, curses.COLOR_CYAN, bg)     # own sender
-        safe_init(6, curses.COLOR_YELLOW, bg)   # sending
-        safe_init(7, curses.COLOR_RED, bg)      # failed
-        safe_init(8, curses.COLOR_BLUE, bg)     # enc tag
-        safe_init(9, curses.COLOR_CYAN, bg)     # header
-        safe_init(10, curses.COLOR_WHITE, bg)   # muted
-        safe_init(11, curses.COLOR_WHITE, bg)   # title
-        safe_init(12, curses.COLOR_CYAN, bg)    # date separator
+        safe_init(1, curses.COLOR_WHITE, bg)
+        safe_init(2, curses.COLOR_GREEN, bg)
+        safe_init(3, curses.COLOR_CYAN, bg)
+        safe_init(4, curses.COLOR_WHITE, bg)
+        safe_init(5, curses.COLOR_GREEN, bg)
+        safe_init(6, curses.COLOR_YELLOW, bg)
+        safe_init(7, curses.COLOR_RED, bg)
+        safe_init(8, curses.COLOR_MAGENTA, bg)
+        safe_init(9, curses.COLOR_CYAN, bg)
+        safe_init(10, curses.COLOR_WHITE, bg)
+        safe_init(11, curses.COLOR_GREEN, bg)
+        safe_init(12, curses.COLOR_CYAN, bg)
+        safe_init(13, curses.COLOR_YELLOW, bg)
+        safe_init(14, curses.COLOR_GREEN, bg)
+        safe_init(15, curses.COLOR_MAGENTA, bg)
 
     def push_message(self, msg: dict):
         logging.debug(f"push_message: {msg}")
@@ -128,483 +146,473 @@ class ChatUI:
                     break
         self._dirty.set()
 
-    def handle_command(self, text: str):
-        parts = text.split()
-        cmd = parts[0].lower()
+    def _system(self, body: str):
+        self.push_message({"type": "system", "body": str(body), "ts": time.time()})
 
-        if cmd == "/help":
-            self.push_message(
-                {
-                    "type": "system",
-                    "body": (
-                        "Commands: /join <@chan>, /connect <peer_id>, /load [n|on|off], "
-                        "/listen <port>, /port <show|set|random|test>, /peers, /ping <peer_id|ip[:port]>, "
-                        "/resolve <host>, /scan <host>, /lan, "
-                        "/status, /clear, /quit"
-                    ),
-                    "ts": time.time(),
-                }
-            )
-        elif cmd == "/clear":
-            with self._lock:
-                self.messages = []
-            self._dirty.set()
-        elif cmd == "/quit":
-            self._running = False
-        elif cmd == "/load":
-            if len(parts) > 1 and parts[1].lower() in {"off", "stop"}:
-                self.auto_load_enabled = False
-                self.push_message(
-                    {"type": "system", "body": "Auto-load disabled.", "ts": time.time()}
+    def _show_help(self):
+        self._system("Quick commands:")
+        self._system("  /join @chan (or /j) | /connect <peer> (or /dm)")
+        self._system(
+            "  /channels | /create @chan [password] | /rename @old @new | /delete @chan"
+        )
+        self._system("  /port show|set <port>|random | /listen <port>")
+        self._system(
+            "  /peers | /ping <peer|ip:port> | /resolve <host> | /scan <host> | /lan"
+        )
+        self._system("  /status | /load [n|on|off] | /clear (or /cls) | /quit (or /q)")
+
+    def handle_command(self, text: str):
+        """Handle user commands with proper error handling."""
+        try:
+            parts = text.strip().split()
+            if not parts:
+                return
+            cmd = parts[0].lower().strip()
+            aliases = {
+                "/h": "/help",
+                "/?": "/help",
+                "/j": "/join",
+                "/dm": "/connect",
+                "/c": "/connect",
+                "/p": "/ping",
+                "/cls": "/clear",
+                "/q": "/quit",
+            }
+            cmd = aliases.get(cmd, cmd)
+
+            if cmd == "/help":
+                self._show_help()
+                return
+            if cmd == "/clear":
+                with self._lock:
+                    self.messages = []
+                self._dirty.set()
+                return
+
+            if cmd == "/quit":
+                self._running = False
+                return
+
+            if cmd == "/load":
+                if len(parts) > 1 and parts[1].lower() in {"off", "stop"}:
+                    self.auto_load_enabled = False
+                    self._system("Auto-load disabled.")
+                    return
+                if len(parts) > 1 and parts[1].lower() in {"on", "start"}:
+                    self.auto_load_enabled = True
+                    self._system(f"Auto-load enabled (limit={self.auto_load_limit}).")
+                elif len(parts) > 1:
+                    try:
+                        self.auto_load_limit = max(1, min(int(parts[1]), 500))
+                        self.auto_load_enabled = True
+                        self._system(
+                            f"Auto-load enabled (limit={self.auto_load_limit})."
+                        )
+                    except ValueError:
+                        self._system("Usage: /load [n|on|off]")
+                        return
+                if self.engine and self.engine.loop:
+                    asyncio.run_coroutine_threadsafe(
+                        self.engine.transport.load_more(
+                            self.active_channel, limit=self.auto_load_limit
+                        ),
+                        self.engine.loop,
+                    )
+                    asyncio.run_coroutine_threadsafe(
+                        self.engine.transport.load_new_messages(
+                            self.active_channel, limit=self.auto_load_limit
+                        ),
+                        self.engine.loop,
+                    )
+                return
+
+            if cmd == "/join" and len(parts) > 1:
+                chan = parts[1]
+                if not chan.startswith("@"):
+                    chan = "@" + chan
+                self.active_channel = chan
+                with self._lock:
+                    self.messages = []
+                if self.engine and self.engine.loop:
+                    asyncio.run_coroutine_threadsafe(
+                        self.engine.join_channel(chan), self.engine.loop
+                    )
+                    asyncio.run_coroutine_threadsafe(
+                        self.engine.transport.load_new_messages(
+                            self.active_channel, limit=self.auto_load_limit
+                        ),
+                        self.engine.loop,
+                    )
+                self._system(f"Switched to channel {chan}")
+                return
+
+            if cmd == "/connect" and len(parts) > 1:
+                requested = parts[1].strip()
+                target = self._resolve_direct_target(requested)
+                self.active_channel = target
+                if len(parts) > 2:
+                    text_to_send = " ".join(parts[2:]).strip()
+                    msg_id = str(uuid.uuid4())
+                    self.push_message(
+                        {
+                            "id": msg_id,
+                            "from_id": self.identity.peer_id,
+                            "from_name": self.identity.username,
+                            "body": text_to_send,
+                            "ts": time.time(),
+                            "state": "sending",
+                            "channel": None,
+                            "to": target,
+                            "enc": "none",
+                            "_seq": 2_000_000_000,
+                        }
+                    )
+                    if self.engine and self.engine.loop:
+                        asyncio.run_coroutine_threadsafe(
+                            self.engine.send_direct(
+                                target, text_to_send, msg_id=msg_id
+                            ),
+                            self.engine.loop,
+                        )
+                self._system(
+                    f"Direct chat target set to {target}"
+                    if target == requested
+                    else f"Direct chat target set to {target} (resolved from {requested})"
                 )
                 return
-            if len(parts) > 1 and parts[1].lower() in {"on", "start"}:
-                self.auto_load_enabled = True
-                self.push_message(
-                    {
-                        "type": "system",
-                        "body": f"Auto-load enabled (limit={self.auto_load_limit}).",
-                        "ts": time.time(),
-                    }
-                )
-            elif len(parts) > 1:
-                try:
-                    self.auto_load_limit = max(1, min(int(parts[1]), 500))
-                    self.auto_load_enabled = True
-                    self.push_message(
-                        {
-                            "type": "system",
-                            "body": f"Auto-load enabled (limit={self.auto_load_limit}).",
-                            "ts": time.time(),
-                        }
+
+            if cmd == "/channels":
+                if self.engine and self.engine.loop:
+                    fut = asyncio.run_coroutine_threadsafe(
+                        self.engine.transport.list_channels(),
+                        self.engine.loop,
                     )
+                    self._system("Loading channels...")
+
+                    def _channels_done(f):
+                        try:
+                            chans = f.result() or []
+                            if not chans:
+                                self._system("No channels found.")
+                                return
+                            self._system("Channels: " + ", ".join(chans[:30]))
+                        except Exception as e:
+                            self._system(f"Channel list failed: {e}")
+
+                    fut.add_done_callback(_channels_done)
+                return
+
+            if cmd == "/create" and len(parts) > 1:
+                chan = parts[1].strip()
+                if not chan.startswith("@"):
+                    chan = "@" + chan
+                password = parts[2].strip() if len(parts) > 2 else None
+                if self.engine and self.engine.loop:
+                    fut = asyncio.run_coroutine_threadsafe(
+                        self.engine.transport.create_channel(chan, password=password),
+                        self.engine.loop,
+                    )
+
+                    def _create_done(f):
+                        try:
+                            res = f.result() or {}
+                            if res.get("ok"):
+                                self._system(f"Channel ready: {chan}")
+                            else:
+                                self._system(
+                                    f"Create channel failed: {res.get('error', 'unknown error')}"
+                                )
+                        except Exception as e:
+                            self._system(f"Create channel error: {e}")
+
+                    fut.add_done_callback(_create_done)
+                return
+
+            if cmd == "/delete" and len(parts) > 1:
+                chan = parts[1].strip()
+                if not chan.startswith("@"):
+                    chan = "@" + chan
+                if chan == "@broadcast":
+                    self._system("@broadcast cannot be deleted.")
+                    return
+                if self.engine and self.engine.loop:
+                    fut = asyncio.run_coroutine_threadsafe(
+                        self.engine.transport.delete_channel(chan),
+                        self.engine.loop,
+                    )
+
+                    def _delete_done(f):
+                        try:
+                            res = f.result() or {}
+                            if res.get("ok"):
+                                self._system(f"Deleted channel {chan}")
+                                if self.active_channel == chan:
+                                    self.active_channel = "@broadcast"
+                                    self._system("Switched back to @broadcast")
+                            else:
+                                self._system(f"Delete failed for {chan}")
+                        except Exception as e:
+                            self._system(f"Delete channel error: {e}")
+
+                    fut.add_done_callback(_delete_done)
+                return
+
+            if cmd == "/rename" and len(parts) > 2:
+                old_chan = parts[1].strip()
+                new_chan = parts[2].strip()
+                if not old_chan.startswith("@"):
+                    old_chan = "@" + old_chan
+                if not new_chan.startswith("@"):
+                    new_chan = "@" + new_chan
+                if old_chan == "@broadcast" or new_chan == "@broadcast":
+                    self._system("@broadcast cannot be renamed.")
+                    return
+                if self.engine and self.engine.loop:
+                    fut = asyncio.run_coroutine_threadsafe(
+                        self.engine.transport.rename_channel(old_chan, new_chan),
+                        self.engine.loop,
+                    )
+
+                    def _rename_done(f):
+                        try:
+                            res = f.result() or {}
+                            if res.get("ok"):
+                                self._system(f"Renamed {old_chan} -> {new_chan}")
+                                if self.active_channel == old_chan:
+                                    self.active_channel = new_chan
+                                    self._system(f"Switched to {new_chan}")
+                            else:
+                                self._system(f"Rename failed: {old_chan} -> {new_chan}")
+                        except Exception as e:
+                            self._system(f"Rename error: {e}")
+
+                    fut.add_done_callback(_rename_done)
+                return
+
+            if cmd == "/status":
+                s = self.engine.transport.status
+                sync = self.engine.transport.get_sync_status(self.active_channel)
+                self._system(
+                    f"P2P Status: {s.get('ip')}:{s.get('port')} (udp:{s.get('udp_port')}) | "
+                    f"last={s.get('last_transport')} | fb={self.engine.transport.fb.db_url} | "
+                    f"seen={sync.get('seen_count')} remote={sync.get('remote_count')} gap={sync.get('gap')}"
+                )
+                return
+
+            if cmd == "/peers":
+                peers = self.engine.transport.list_online_peers()
+                if not peers:
+                    self._system("No peers online.")
+                else:
+                    for p in peers:
+                        body = f"{p.get('name')} ({p.get('id')}) {p.get('ip')}:{p.get('port')} udp:{p.get('udp_port')}"
+                        self._system(body)
+                return
+
+            if cmd == "/ping" and len(parts) > 1:
+                target = parts[1]
+                if self.engine and self.engine.loop:
+                    if ":" in target and not target.count("-") >= 4:
+                        host, port_str = target.rsplit(":", 1)
+                        try:
+                            port = int(port_str)
+                        except ValueError:
+                            self._system("Usage: /ping <peer_id|ip[:port]>")
+                            return
+                        fut = asyncio.run_coroutine_threadsafe(
+                            self.engine.transport.ping_host(host, port),
+                            self.engine.loop,
+                        )
+                        self._system(f"Pinging {host}:{port}...")
+                    else:
+                        fut = asyncio.run_coroutine_threadsafe(
+                            self.engine.transport.ping_peer(target), self.engine.loop
+                        )
+                        self._system(f"Pinging peer {target}...")
+
+                    def _ping_done(f):
+                        try:
+                            result = f.result()
+                            if result.get("ok"):
+                                peer = result.get("peer_id") or result.get("host")
+                                self._system(
+                                    f"Ping ok: {peer} in {result.get('latency_ms')} ms"
+                                )
+                            else:
+                                self._system(
+                                    f"Ping failed: {result.get('error', 'unknown error')}"
+                                )
+                        except Exception as e:
+                            self._system(f"Ping error: {e}")
+
+                    fut.add_done_callback(_ping_done)
+                return
+
+            if cmd == "/resolve" and len(parts) > 1:
+                host = parts[1].strip()
+                if self.engine and self.engine.loop:
+                    fut = asyncio.run_coroutine_threadsafe(
+                        self.engine.transport.resolve_host(host), self.engine.loop
+                    )
+                    self._system(f"Resolving {host}...")
+
+                    def _resolve_done(f):
+                        try:
+                            result = f.result()
+                            if not result.get("ok"):
+                                self._system(
+                                    f"Resolve failed: {result.get('error', 'unknown error')}"
+                                )
+                                return
+                            addrs = result.get("addresses") or []
+                            self._system(
+                                f"{host} -> {', '.join(addrs)} ({result.get('latency_ms')} ms)"
+                            )
+                        except Exception as e:
+                            self._system(f"Resolve error: {e}")
+
+                    fut.add_done_callback(_resolve_done)
+                return
+
+            if cmd == "/scan" and len(parts) > 1:
+                host = parts[1].strip()
+                if self.engine and self.engine.loop:
+                    fut = asyncio.run_coroutine_threadsafe(
+                        self.engine.transport.scan_common_ports(host), self.engine.loop
+                    )
+                    self._system(f"Scanning common ports on {host}...")
+
+                    def _scan_done(f):
+                        try:
+                            result = f.result()
+                            open_ports = result.get("open_ports") or []
+                            self._system(
+                                f"Scan done in {result.get('elapsed_ms')} ms. Open: {len(open_ports)}"
+                            )
+                            for item in open_ports:
+                                self._system(
+                                    f"{host}:{item.get('port')} ({item.get('latency_ms')} ms)"
+                                )
+                        except Exception as e:
+                            self._system(f"Scan error: {e}")
+
+                    fut.add_done_callback(_scan_done)
+                return
+
+            if cmd == "/lan":
+                if self.engine and self.engine.loop:
+                    fut = asyncio.run_coroutine_threadsafe(
+                        self.engine.transport.list_lan_devices(), self.engine.loop
+                    )
+                    self._system("Discovering LAN devices...")
+
+                    def _lan_done(f):
+                        try:
+                            result = f.result()
+                            if not result.get("ok"):
+                                self._system(
+                                    f"LAN discovery failed: {result.get('error', 'unknown error')}"
+                                )
+                                return
+                            devices = result.get("devices") or []
+                            self._system(f"LAN devices in ARP cache: {len(devices)}")
+                            for d in devices[:30]:
+                                self._system(
+                                    f"{d.get('ip')} {d.get('mac')} ({d.get('host')})"
+                                )
+                        except Exception as e:
+                            self._system(f"LAN error: {e}")
+
+                    fut.add_done_callback(_lan_done)
+                return
+
+            if cmd == "/listen" and len(parts) > 1:
+                try:
+                    port = int(parts[1])
+                    if port < 1 or port > 65535:
+                        raise ValueError
                 except ValueError:
-                    self.push_message(
-                        {
-                            "type": "system",
-                            "body": "Usage: /load [n|on|off]",
-                            "ts": time.time(),
-                        }
+                    self._system("Usage: /listen <1-65535>")
+                    return
+                if self.engine and self.engine.loop:
+                    fut = asyncio.run_coroutine_threadsafe(
+                        self.engine.transport.set_listen_port(port), self.engine.loop
+                    )
+                    self._system(f"Switching listener to port {port}...")
+
+                    def _done(f):
+                        try:
+                            bound = f.result()
+                            self._system(f"Listening on port {bound}.")
+                        except Exception as e:
+                            self._system(f"Failed to bind port {port}: {e}")
+
+                    fut.add_done_callback(_done)
+                return
+
+            if cmd == "/port":
+                if len(parts) == 1 or parts[1] == "show":
+                    s = self.engine.transport.status
+                    self._system(
+                        f"Ports tcp:{s.get('port')} udp:{s.get('udp_port')} ip:{s.get('ip')}"
                     )
                     return
-            if self.engine and self.engine.loop:
-                asyncio.run_coroutine_threadsafe(
-                    self.engine.transport.load_more(
-                        self.active_channel, limit=self.auto_load_limit
-                    ),
-                    self.engine.loop,
+                sub = parts[1].lower()
+                if sub == "set" and len(parts) > 2:
+                    self.handle_command(f"/listen {parts[2]}")
+                    return
+                if sub == "random":
+                    if self.engine and self.engine.loop:
+                        fut = asyncio.run_coroutine_threadsafe(
+                            self.engine.transport.create_random_listen_port(),
+                            self.engine.loop,
+                        )
+                        self._system("Creating random listen port...")
+
+                        def _port_done(f):
+                            try:
+                                bound = f.result()
+                                self._system(f"Random listen port: {bound}")
+                            except Exception as e:
+                                self._system(f"Port error: {e}")
+
+                        fut.add_done_callback(_port_done)
+                    return
+                if sub == "test" and len(parts) > 2:
+                    self.handle_command(f"/ping {parts[2]}")
+                    return
+                self._system("Usage: /port <show|set <port>|random|test <ip:port>>")
+                return
+
+            if cmd == "/menu":
+                self._system(
+                    "In-session shortcuts: /help, /join, /connect, /channels, /create, /rename, /delete, /port"
                 )
-                asyncio.run_coroutine_threadsafe(
-                    self.engine.transport.load_new_messages(
-                        self.active_channel, limit=self.auto_load_limit
-                    ),
-                    self.engine.loop,
-                )
-        elif cmd == "/join" and len(parts) > 1:
-            chan = parts[1]
-            if not chan.startswith("@"):
-                chan = "@" + chan
-            self.active_channel = chan
-            with self._lock:
-                self.messages = []
-            if self.engine and self.engine.loop:
-                asyncio.run_coroutine_threadsafe(
-                    self.engine.join_channel(chan), self.engine.loop
-                )
-                asyncio.run_coroutine_threadsafe(
-                    self.engine.transport.load_new_messages(
-                        self.active_channel, limit=self.auto_load_limit
-                    ),
-                    self.engine.loop,
-                )
-        elif cmd == "/connect" and len(parts) > 1:
-            target = parts[1].strip()
-            self.active_channel = target
-            self.push_message(
-                {
-                    "type": "system",
-                    "body": f"Direct chat target set to {target}",
-                    "ts": time.time(),
-                }
-            )
-        elif cmd == "/status":
-            s = self.engine.transport.status
-            sync = self.engine.transport.get_sync_status(self.active_channel)
-            self.push_message(
-                {
-                    "type": "system",
-                    "body": (
-                        f"P2P Status: {s.get('ip')}:{s.get('port')} "
-                        f"(udp:{s.get('udp_port')}) "
-                        f"| last={s.get('last_transport')} "
-                        f"| fb={self.engine.transport.fb.db_url} "
-                        f"| seen={sync.get('seen_count')} remote={sync.get('remote_count')} gap={sync.get('gap')}"
-                    ),
-                    "ts": time.time(),
-                }
-            )
-        elif cmd == "/peers":
-            peers = self.engine.transport.list_online_peers()
-            if not peers:
-                self.push_message(
-                    {"type": "system", "body": "No peers online.", "ts": time.time()}
-                )
-            else:
-                for p in peers:
-                    body = f"{p.get('name')} ({p.get('id')}) {p.get('ip')}:{p.get('port')} udp:{p.get('udp_port')}"
-                    self.push_message(
-                        {"type": "system", "body": body, "ts": time.time()}
-                    )
-        elif cmd == "/ping" and len(parts) > 1:
-            target = parts[1]
-            if self.engine and self.engine.loop:
-                if ":" in target and not target.count("-") >= 4:
+                return
+
+            if cmd == "/direct" and len(parts) > 2:
+                target = parts[1]
+                text_to_send = " ".join(parts[2:])
+                if ":" in target:
                     host, port_str = target.rsplit(":", 1)
                     try:
                         port = int(port_str)
                     except ValueError:
-                        self.push_message(
-                            {
-                                "type": "system",
-                                "body": "Usage: /ping <peer_id|ip[:port]>",
-                                "ts": time.time(),
-                            }
-                        )
+                        self._system("Usage: /direct <ip>:<port> <text>")
                         return
-                    fut = asyncio.run_coroutine_threadsafe(
-                        self.engine.transport.ping_host(host, port), self.engine.loop
-                    )
-                    self.push_message(
-                        {
-                            "type": "system",
-                            "body": f"Pinging {host}:{port}...",
-                            "ts": time.time(),
-                        }
-                    )
+                    if self.engine and self.engine.loop:
+                        asyncio.run_coroutine_threadsafe(
+                            self.engine.transport.send_raw(host, port, text_to_send),
+                            self.engine.loop,
+                        )
+                        self._system(f"Sent raw text to {target}")
                 else:
-                    fut = asyncio.run_coroutine_threadsafe(
-                        self.engine.transport.ping_peer(target), self.engine.loop
-                    )
-                    self.push_message(
-                        {
-                            "type": "system",
-                            "body": f"Pinging peer {target}...",
-                            "ts": time.time(),
-                        }
-                    )
-
-                def _ping_done(f):
-                    try:
-                        result = f.result()
-                        if result.get("ok"):
-                            peer = result.get("peer_id") or result.get("host")
-                            self.push_message(
-                                {
-                                    "type": "system",
-                                    "body": f"Ping ok: {peer} in {result.get('latency_ms')} ms",
-                                    "ts": time.time(),
-                                }
-                            )
-                        else:
-                            self.push_message(
-                                {
-                                    "type": "system",
-                                    "body": f"Ping failed: {result.get('error', 'unknown error')}",
-                                    "ts": time.time(),
-                                }
-                            )
-                    except Exception as e:
-                        self.push_message(
-                            {
-                                "type": "system",
-                                "body": f"Ping error: {e}",
-                                "ts": time.time(),
-                            }
-                        )
-
-                fut.add_done_callback(_ping_done)
-        elif cmd == "/resolve" and len(parts) > 1:
-            host = parts[1].strip()
-            if self.engine and self.engine.loop:
-                fut = asyncio.run_coroutine_threadsafe(
-                    self.engine.transport.resolve_host(host), self.engine.loop
-                )
-                self.push_message(
-                    {
-                        "type": "system",
-                        "body": f"Resolving {host}...",
-                        "ts": time.time(),
-                    }
-                )
-
-                def _resolve_done(f):
-                    try:
-                        result = f.result()
-                        if not result.get("ok"):
-                            self.push_message(
-                                {
-                                    "type": "system",
-                                    "body": f"Resolve failed: {result.get('error', 'unknown error')}",
-                                    "ts": time.time(),
-                                }
-                            )
-                            return
-                        addrs = result.get("addresses") or []
-                        self.push_message(
-                            {
-                                "type": "system",
-                                "body": f"{host} -> {', '.join(addrs)} ({result.get('latency_ms')} ms)",
-                                "ts": time.time(),
-                            }
-                        )
-                    except Exception as e:
-                        self.push_message(
-                            {
-                                "type": "system",
-                                "body": f"Resolve error: {e}",
-                                "ts": time.time(),
-                            }
-                        )
-
-                fut.add_done_callback(_resolve_done)
-        elif cmd == "/scan" and len(parts) > 1:
-            host = parts[1].strip()
-            if self.engine and self.engine.loop:
-                fut = asyncio.run_coroutine_threadsafe(
-                    self.engine.transport.scan_common_ports(host), self.engine.loop
-                )
-                self.push_message(
-                    {
-                        "type": "system",
-                        "body": f"Scanning common ports on {host}...",
-                        "ts": time.time(),
-                    }
-                )
-
-                def _scan_done(f):
-                    try:
-                        result = f.result()
-                        open_ports = result.get("open_ports") or []
-                        self.push_message(
-                            {
-                                "type": "system",
-                                "body": f"Scan done in {result.get('elapsed_ms')} ms. Open: {len(open_ports)}",
-                                "ts": time.time(),
-                            }
-                        )
-                        for item in open_ports:
-                            self.push_message(
-                                {
-                                    "type": "system",
-                                    "body": f"{host}:{item.get('port')} ({item.get('latency_ms')} ms)",
-                                    "ts": time.time(),
-                                }
-                            )
-                    except Exception as e:
-                        self.push_message(
-                            {
-                                "type": "system",
-                                "body": f"Scan error: {e}",
-                                "ts": time.time(),
-                            }
-                        )
-
-                fut.add_done_callback(_scan_done)
-        elif cmd == "/lan":
-            if self.engine and self.engine.loop:
-                fut = asyncio.run_coroutine_threadsafe(
-                    self.engine.transport.list_lan_devices(), self.engine.loop
-                )
-                self.push_message(
-                    {
-                        "type": "system",
-                        "body": "Discovering LAN devices...",
-                        "ts": time.time(),
-                    }
-                )
-
-                def _lan_done(f):
-                    try:
-                        result = f.result()
-                        if not result.get("ok"):
-                            self.push_message(
-                                {
-                                    "type": "system",
-                                    "body": f"LAN discovery failed: {result.get('error', 'unknown error')}",
-                                    "ts": time.time(),
-                                }
-                            )
-                            return
-                        devices = result.get("devices") or []
-                        self.push_message(
-                            {
-                                "type": "system",
-                                "body": f"LAN devices in ARP cache: {len(devices)}",
-                                "ts": time.time(),
-                            }
-                        )
-                        for d in devices[:30]:
-                            self.push_message(
-                                {
-                                    "type": "system",
-                                    "body": f"{d.get('ip')} {d.get('mac')} ({d.get('host')})",
-                                    "ts": time.time(),
-                                }
-                            )
-                    except Exception as e:
-                        self.push_message(
-                            {
-                                "type": "system",
-                                "body": f"LAN error: {e}",
-                                "ts": time.time(),
-                            }
-                        )
-
-                fut.add_done_callback(_lan_done)
-        elif cmd == "/listen" and len(parts) > 1:
-            try:
-                port = int(parts[1])
-                if port < 1 or port > 65535:
-                    raise ValueError
-            except ValueError:
-                self.push_message(
-                    {
-                        "type": "system",
-                        "body": "Usage: /listen <1-65535>",
-                        "ts": time.time(),
-                    }
-                )
+                    self._system("Usage: /direct <ip>:<port> <text>")
                 return
-            if self.engine and self.engine.loop:
-                fut = asyncio.run_coroutine_threadsafe(
-                    self.engine.transport.set_listen_port(port), self.engine.loop
-                )
-                self.push_message(
-                    {
-                        "type": "system",
-                        "body": f"Switching listener to port {port}...",
-                        "ts": time.time(),
-                    }
-                )
 
-                def _done(f):
-                    try:
-                        bound = f.result()
-                        self.push_message(
-                            {
-                                "type": "system",
-                                "body": f"Listening on port {bound}.",
-                                "ts": time.time(),
-                            }
-                        )
-                    except Exception as e:
-                        self.push_message(
-                            {
-                                "type": "system",
-                                "body": f"Failed to bind port {port}: {e}",
-                                "ts": time.time(),
-                            }
-                        )
-
-                fut.add_done_callback(_done)
-        elif cmd == "/port":
-            if len(parts) == 1 or parts[1] == "show":
-                s = self.engine.transport.status
-                self.push_message(
-                    {
-                        "type": "system",
-                        "body": f"Ports tcp:{s.get('port')} udp:{s.get('udp_port')} ip:{s.get('ip')}",
-                        "ts": time.time(),
-                    }
-                )
-                return
-            sub = parts[1].lower()
-            if sub == "set" and len(parts) > 2:
-                self.handle_command(f"/listen {parts[2]}")
-                return
-            if sub == "random":
-                if self.engine and self.engine.loop:
-                    fut = asyncio.run_coroutine_threadsafe(
-                        self.engine.transport.create_random_listen_port(),
-                        self.engine.loop,
-                    )
-                    self.push_message(
-                        {
-                            "type": "system",
-                            "body": "Creating random listen port...",
-                            "ts": time.time(),
-                        }
-                    )
-
-                    def _port_done(f):
-                        try:
-                            bound = f.result()
-                            self.push_message(
-                                {
-                                    "type": "system",
-                                    "body": f"Random listen port: {bound}",
-                                    "ts": time.time(),
-                                }
-                            )
-                        except Exception as e:
-                            self.push_message(
-                                {
-                                    "type": "system",
-                                    "body": f"Port error: {e}",
-                                    "ts": time.time(),
-                                }
-                            )
-
-                    fut.add_done_callback(_port_done)
-                return
-            if sub == "test" and len(parts) > 2:
-                self.handle_command(f"/ping {parts[2]}")
-                return
-            self.push_message(
-                {
-                    "type": "system",
-                    "body": "Usage: /port <show|set <port>|random|test <ip:port>>",
-                    "ts": time.time(),
-                }
-            )
-        elif cmd == "/menu":
-            self.push_message(
-                {
-                    "type": "system",
-                    "body": "Startup menu includes network tools. In-session tools: /peers, /ping, /resolve, /scan, /lan, /port.",
-                    "ts": time.time(),
-                }
-            )
-        elif cmd == "/direct" and len(parts) > 2:
-            target = parts[1]
-            text_to_send = " ".join(parts[2:])
-            if ":" in target:
-                host, port_str = target.rsplit(":", 1)
-                port = int(port_str)
-                if self.engine and self.engine.loop:
-                    asyncio.run_coroutine_threadsafe(
-                        self.engine.transport.send_raw(host, port, text_to_send),
-                        self.engine.loop,
-                    )
-                    self.push_message(
-                        {
-                            "type": "system",
-                            "body": f"Sent raw text to {target}",
-                            "ts": time.time(),
-                        }
-                    )
-            else:
-                self.push_message(
-                    {
-                        "type": "system",
-                        "body": "Usage: /direct <ip>:<port> <text>",
-                        "ts": time.time(),
-                    }
-                )
-        else:
-            self.push_message(
-                {"type": "system", "body": f"Unknown command: {cmd}", "ts": time.time()}
-            )
+            self._system(f"Unknown command: {cmd}. Try /help")
+        except Exception as e:
+            self._system(f"Command error: {e}")
 
     def handle_key(self, key):
         if key in (curses.KEY_BACKSPACE, 127, 8):
@@ -661,10 +669,18 @@ class ChatUI:
                                 self.engine.loop,
                             )
                         else:
+                            target = self._resolve_direct_target(self.active_channel)
+                            if target != self.active_channel:
+                                self.active_channel = target
+                                self.push_message(
+                                    {
+                                        "type": "system",
+                                        "body": f"Direct target resolved to {target}",
+                                        "ts": time.time(),
+                                    }
+                                )
                             asyncio.run_coroutine_threadsafe(
-                                self.engine.send_direct(
-                                    self.active_channel, text, msg_id=msg_id
-                                ),
+                                self.engine.send_direct(target, text, msg_id=msg_id),
                                 self.engine.loop,
                             )
             self.input_buf = ""
@@ -684,45 +700,73 @@ class ChatUI:
         stdscr.erase()
 
         if H < 8 or W < 40:
-            stdscr.addstr(0, 0, "Hermes", curses.color_pair(11) | curses.A_BOLD)
-            stdscr.addstr(1, 0, "Window too small. Resize to continue.", curses.color_pair(1))
+            try:
+                stdscr.addstr(
+                    0,
+                    0,
+                    "═══ Hermes ═══"[: W - 1],
+                    curses.color_pair(11) | curses.A_BOLD,
+                )
+                stdscr.addstr(
+                    1,
+                    0,
+                    "Window too small. Resize to continue."[: W - 1],
+                    curses.color_pair(10),
+                )
+            except curses.error:
+                pass
             stdscr.refresh()
             return
 
-        header_left = f"Hermes v{VERSION} | {self.active_channel}"
-        stdscr.addstr(0, 0, header_left[: W - 1], curses.color_pair(11) | curses.A_BOLD)
-
         s = self.engine.transport.status
         online_count = sum(1 for p in self.peers if p.online)
-        right_status = f"online:{online_count}"
-        if self._sync_gap > 0:
-            right_status += f" sync:+{self._sync_gap}"
-        if W - len(right_status) - 1 > len(header_left) + 1:
-            stdscr.addstr(0, W - len(right_status) - 1, right_status, curses.color_pair(3))
+        enc_mode = getattr(self.config.crypto, "default_mode", "none")
 
-        enc_mode = getattr(self.config.crypto, 'default_mode', 'none')
-        meta = (
-            f"net:{s.get('last_transport') or '-'} "
-            f"tcp:{s.get('port') or '-'} "
-            f"udp:{s.get('udp_port') or '-'} "
-            f"enc:{enc_mode}"
+        header_left = f"╔══ Hermes v{VERSION} ══ {self.active_channel}"
+        header_right = f"online:{online_count} ══╗"
+        header_full = f"{header_left}{' ' * max(0, W - len(header_left) - len(header_right) - 4)}{header_right}"
+        try:
+            stdscr.addstr(
+                0, 0, header_full[: W - 1], curses.color_pair(11) | curses.A_BOLD
+            )
+        except curses.error:
+            pass
+
+        conn_info = (
+            f"║ TCP:{s.get('port') or '-'} UDP:{s.get('udp_port') or '-'} "
+            f"| {s.get('last_transport') or 'idle'} "
+            f"| enc:{enc_mode}"
         )
-        stdscr.addstr(1, 0, meta[: W - 1], curses.color_pair(10))
+        conn_info = conn_info.ljust(W - 2) + "║"
+        try:
+            stdscr.addstr(1, 0, conn_info[: W - 1], curses.color_pair(3))
+        except curses.error:
+            pass
 
-        line = "-" * (W - 1)
-        stdscr.addstr(2, 0, line, curses.color_pair(10))
-        stdscr.addstr(H - 2, 0, line, curses.color_pair(10))
+        try:
+            stdscr.addstr(2, 0, "╠" + "═" * (W - 2) + "╣", curses.color_pair(10))
+        except curses.error:
+            pass
 
-        prefix = "> "
-        stdscr.addstr(H - 1, 0, prefix[: W - 1], curses.color_pair(1))
-        stdscr.addstr(
-            H - 1,
-            len(prefix),
-            self.input_buf[: W - len(prefix) - 10],
-            curses.color_pair(2),
-        )
-        if W > 40:
-            stdscr.addstr(H - 1, W - 14, "Enter | /help", curses.color_pair(10))
+        try:
+            stdscr.addstr(H - 2, 0, "╚" + "═" * (W - 2) + "╝", curses.color_pair(10))
+        except curses.error:
+            pass
+
+        prefix = "╚► "
+        hint = "Enter | /help"
+        try:
+            stdscr.addstr(H - 1, 0, prefix, curses.color_pair(11) | curses.A_BOLD)
+            stdscr.addstr(
+                H - 1,
+                len(prefix),
+                self.input_buf[: W - len(prefix) - len(hint) - 2],
+                curses.color_pair(2) | curses.A_BOLD,
+            )
+            if W > 50:
+                stdscr.addstr(H - 1, W - len(hint) - 1, hint, curses.color_pair(10))
+        except curses.error:
+            pass
 
         msg_rows = H - 5
         if msg_rows > 0:
@@ -787,53 +831,97 @@ class ChatUI:
                     )
 
                     if msg.get("type") == "system":
-                        stdscr.addstr(curr_row, 6, "system".ljust(12), curses.color_pair(10))
-                        stdscr.addstr(
-                            curr_row,
-                            19,
-                            str(msg.get("body", ""))[: W - 26],
-                            curses.color_pair(10),
-                        )
+                        sys_text = f"  ⚡ {msg.get('body', '')}"
+                        try:
+                            stdscr.addstr(
+                                curr_row,
+                                2,
+                                sys_text[: W - 4],
+                                curses.color_pair(15) | curses.A_DIM,
+                            )
+                        except curses.error:
+                            pass
                     else:
                         is_me = msg.get("from_id") == self.identity.peer_id
                         color = curses.color_pair(5) if is_me else curses.color_pair(4)
-                        sender = str(msg.get("from_name", "unknown"))[:11]
-                        sender = f"{sender}{'*' if is_me else ''}"
-                        stdscr.addstr(
-                            curr_row,
-                            6,
-                            sender.ljust(12),
-                            color,
-                        )
-
+                        sender = str(msg.get("from_name", "unknown"))[:10]
+                        prefix_char = "▸" if is_me else "▹"
                         state = msg.get("state", "sent")
-                        attr = curses.color_pair(2)
-                        suffix = ""
-                        if state == "sending":
-                            attr = curses.color_pair(6)
-                            suffix = " ..."
-                        elif state == "failed":
-                            attr = curses.color_pair(7) | curses.A_DIM
-                            suffix = " x"
 
-                        stdscr.addstr(
-                            curr_row,
-                            19,
-                            (str(msg.get("body", "")) + suffix)[: W - 26],
-                            attr,
-                        )
-                        if state == "sent" and msg.get("enc") and msg["enc"] != "none":
-                            tag = msg["enc"].replace("custom:", "")[:6]
-                            if W - len(tag) - 1 > 16:
+                        state_icon = ""
+                        state_attr = curses.color_pair(2)
+                        if state == "sending":
+                            state_icon = " ⏳"
+                            state_attr = curses.color_pair(6)
+                        elif state == "sent":
+                            state_icon = " ✓"
+                            state_attr = curses.color_pair(14)
+                        elif state == "failed":
+                            state_icon = " ✗"
+                            state_attr = curses.color_pair(7)
+
+                        try:
+                            stdscr.addstr(
+                                curr_row,
+                                2,
+                                f"{prefix_char} {sender}",
+                                color | curses.A_BOLD,
+                            )
+                            body_start = 2 + len(f"{prefix_char} {sender}")
+                            body_text = str(msg.get("body", ""))
+                            if body_start + len(body_text) < W - 5:
                                 stdscr.addstr(
                                     curr_row,
-                                    W - len(tag) - 1,
-                                    tag,
-                                    curses.color_pair(8),
+                                    body_start + 1,
+                                    body_text[: W - body_start - 5],
+                                    state_attr,
                                 )
+                            else:
+                                stdscr.addstr(
+                                    curr_row,
+                                    body_start + 1,
+                                    body_text[: W - body_start - 5],
+                                    state_attr,
+                                )
+                            if (
+                                W - body_start - len(body_text[: W - body_start - 5])
+                                > 4
+                            ):
+                                end_pos = min(
+                                    W - 2,
+                                    body_start
+                                    + 1
+                                    + len(body_text[: W - body_start - 5]),
+                                )
+                                stdscr.addstr(
+                                    curr_row,
+                                    end_pos,
+                                    state_icon,
+                                    state_attr | curses.A_DIM,
+                                )
+                        except curses.error:
+                            pass
+
+                        if msg.get("enc") and msg["enc"] != "none":
+                            enc_tag = f" [{msg['enc'].replace('custom:', '')[:4]}]"
+                            enc_pos = W - len(enc_tag) - 1
+                            if enc_pos > 20:
+                                try:
+                                    stdscr.addstr(
+                                        curr_row,
+                                        enc_pos,
+                                        enc_tag,
+                                        curses.color_pair(8) | curses.A_DIM,
+                                    )
+                                except curses.error:
+                                    pass
                     curr_row += 1
 
-        stdscr.move(H - 1, min(W - 1, len(prefix) + self.input_cursor))
+        cursor_pos = min(W - 2, len(prefix) + self.input_cursor)
+        try:
+            stdscr.move(H - 1, cursor_pos)
+        except curses.error:
+            pass
         stdscr.refresh()
 
     def _main(self, stdscr):
@@ -900,7 +988,9 @@ class ChatUI:
                 if now - self._last_sync_check >= self._sync_check_interval:
                     self._last_sync_check = now
                     try:
-                        sync = self.engine.transport.get_sync_status(self.active_channel)
+                        sync = self.engine.transport.get_sync_status(
+                            self.active_channel
+                        )
                         gap = int(sync.get("gap") or 0)
                         self._sync_gap = gap
                         if gap > 0 and self.engine and self.engine.loop:

@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Hermes Cloud</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --bg: #0b1016;
+        --surface: #121922;
+        --surface-2: #1a2432;
+        --border: #2a3544;
+        --text: #e7edf7;
+        --muted: #9fb0c8;
+        --accent: #3a8bfd;
+        --accent-2: #53a4ff;
+        --danger: #f05a6c;
+        --ok: #2fcf8f;
+      }
+      :root[data-theme='light'] {
+        --bg: #f4f7fc;
+        --surface: #ffffff;
+        --surface-2: #ecf2fb;
+        --border: #d8e2ef;
+        --text: #1f2937;
+        --muted: #637389;
+        --accent: #2563eb;
+        --accent-2: #3b82f6;
+        --danger: #dc3545;
+        --ok: #0d9f6e;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        font-family: 'Plus Jakarta Sans', sans-serif;
+        background: radial-gradient(circle at top right, #192436 0%, var(--bg) 40%);
+        color: var(--text);
+      }
+      .app {
+        display: grid;
+        grid-template-columns: 320px 1fr;
+        height: 100vh;
+      }
+      .sidebar {
+        background: color-mix(in oklab, var(--surface) 92%, transparent);
+        border-right: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+      }
+      .sidebar-header {
+        padding: 20px;
+        border-bottom: 1px solid var(--border);
+      }
+      .sidebar-title {
+        font-size: 24px;
+        font-weight: 800;
+      }
+      .status {
+        color: var(--muted);
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 12px;
+      }
+      .toolbar {
+        padding: 12px 16px;
+        display: flex;
+        gap: 8px;
+        border-bottom: 1px solid var(--border);
+      }
+      .btn {
+        border: 1px solid var(--border);
+        background: var(--surface-2);
+        color: var(--text);
+        border-radius: 10px;
+        padding: 9px 12px;
+        font-size: 13px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      .btn:hover {
+        border-color: var(--accent);
+      }
+      .btn-danger {
+        border-color: color-mix(in oklab, var(--danger) 40%, var(--border));
+      }
+      .chat-list {
+        overflow: auto;
+        padding: 10px;
+      }
+      .chat-card {
+        border: 1px solid transparent;
+        background: transparent;
+        border-radius: 12px;
+        padding: 12px;
+        margin-bottom: 8px;
+        cursor: pointer;
+      }
+      .chat-card:hover {
+        background: var(--surface-2);
+      }
+      .chat-card.active {
+        border-color: var(--accent);
+        background: color-mix(in oklab, var(--accent) 12%, var(--surface-2));
+      }
+      .main {
+        display: grid;
+        grid-template-rows: 68px 1fr 76px;
+      }
+      .chat-header {
+        padding: 0 20px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        background: color-mix(in oklab, var(--surface) 92%, transparent);
+      }
+      .header-actions {
+        display: flex;
+        gap: 8px;
+      }
+      .messages {
+        overflow: auto;
+        padding: 18px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .msg {
+        max-width: 70%;
+        border-radius: 14px;
+        padding: 10px 12px;
+        background: var(--surface-2);
+      }
+      .msg.me {
+        align-self: end;
+        background: linear-gradient(135deg, var(--accent), var(--accent-2));
+        color: white;
+      }
+      .meta {
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .composer {
+        border-top: 1px solid var(--border);
+        display: flex;
+        gap: 10px;
+        padding: 14px 16px;
+        background: var(--surface);
+      }
+      #message-input {
+        flex: 1;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--bg);
+        color: var(--text);
+        padding: 12px;
+        font-size: 14px;
+      }
+      .modal {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: rgba(0, 0, 0, 0.6);
+      }
+      .modal.open {
+        display: flex;
+      }
+      .modal-card {
+        width: min(440px, 92vw);
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 16px;
+      }
+      .modal-card h3 {
+        margin: 0 0 10px;
+      }
+      .field {
+        margin: 10px 0;
+      }
+      .field input {
+        width: 100%;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px;
+        background: var(--bg);
+        color: var(--text);
+      }
+      .modal-actions {
+        margin-top: 14px;
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+      @media (max-width: 860px) {
+        .app {
+          grid-template-columns: 1fr;
+        }
+        .sidebar {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="sidebar-header">
+          <div class="sidebar-title">Hermes</div>
+          <div class="status" id="connection-text">Connecting...</div>
+        </div>
+        <div class="toolbar">
+          <button class="btn" id="btn-create">New</button>
+          <button class="btn" id="btn-rename">Rename</button>
+          <button class="btn btn-danger" id="btn-delete">Delete</button>
+        </div>
+        <div class="chat-list" id="chat-list"></div>
+      </aside>
+
+      <main class="main">
+        <header class="chat-header">
+          <div>
+            <div id="chat-title">@broadcast</div>
+            <div class="meta" id="transport-info">Cloud Relay</div>
+          </div>
+          <div class="header-actions">
+            <button class="btn" id="btn-theme">Theme</button>
+          </div>
+        </header>
+        <section class="messages" id="chat-messages"></section>
+        <footer class="composer">
+          <input id="message-input" placeholder="Type message..." />
+          <button class="btn" id="send-btn">Send</button>
+        </footer>
+      </main>
+    </div>
+
+    <div class="modal" id="settings-overlay">
+      <div class="modal-card">
+        <h3>Welcome</h3>
+        <div class="field">
+          <input id="settings-name" placeholder="Username" maxlength="20" />
+        </div>
+        <div class="modal-actions">
+          <button class="btn" id="settings-save">Enter</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal" id="chat-modal">
+      <div class="modal-card">
+        <h3 id="chat-modal-title">Create Chat</h3>
+        <div class="field"><input id="chat-modal-name" placeholder="@team" /></div>
+        <div class="field" id="chat-modal-new-wrap" style="display:none"><input id="chat-modal-new-name" placeholder="@new-team" /></div>
+        <div class="modal-actions">
+          <button class="btn" id="chat-modal-cancel">Cancel</button>
+          <button class="btn" id="chat-modal-confirm">Confirm</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/firebase-config.js"></script>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

@@ -57,7 +57,13 @@ class FirebaseTransport:
             ts = ts / 1000.0
         return ts
 
-    def _request(self, path: str, method: str = "GET", data: Any = None, params: dict | None = None) -> Any:
+    def _request(
+        self,
+        path: str,
+        method: str = "GET",
+        data: Any = None,
+        params: dict | None = None,
+    ) -> Any:
         if not self.db_url:
             logger.error("Firebase database URL is not configured")
             return None
@@ -87,7 +93,11 @@ class FirebaseTransport:
             return {"ok": False, "error": "Invalid password"}
 
         peer_id = str(uuid4())
-        res = self._request(f"users/{username}", method="PUT", data={"password": hashed, "peer_id": peer_id})
+        res = self._request(
+            f"users/{username}",
+            method="PUT",
+            data={"password": hashed, "peer_id": peer_id},
+        )
         if res is None:
             return {"ok": False, "error": "Network error during registration"}
         return {"ok": True, "peer_id": peer_id, "username": username}
@@ -101,10 +111,63 @@ class FirebaseTransport:
             if room_data["password"] != hashed:
                 return {"ok": False, "error": f"Wrong password for {room_name}"}
         elif not room_data:
-            self._request(f"rooms/{safe_name}", method="PUT", data={"password": hashed, "created_at": time.time()})
+            self._request(
+                f"rooms/{safe_name}",
+                method="PUT",
+                data={"password": hashed, "created_at": time.time()},
+            )
 
-        path = f"messages/chan_{safe_name}" if safe_name != "broadcast" else "messages/broadcast"
+        path = (
+            f"messages/chan_{safe_name}"
+            if safe_name != "broadcast"
+            else "messages/broadcast"
+        )
         return {"ok": True, "path": path}
+
+    async def list_rooms(self) -> list[str]:
+        data = self._request("rooms")
+        if not isinstance(data, dict):
+            return []
+        names = []
+        for key in sorted(data.keys()):
+            if key == "broadcast":
+                names.append("@broadcast")
+            else:
+                names.append(f"@{key}")
+        return names
+
+    async def delete_room(self, room_name: str) -> bool:
+        safe_name = str(room_name or "").replace("@", "").strip().lower()
+        if not safe_name or safe_name == "broadcast":
+            return False
+        self._request(f"rooms/{safe_name}", method="DELETE")
+        self._request(f"messages/chan_{safe_name}", method="DELETE")
+        return True
+
+    async def rename_room(self, old_name: str, new_name: str) -> bool:
+        old_safe = str(old_name or "").replace("@", "").strip().lower()
+        new_safe = str(new_name or "").replace("@", "").strip().lower()
+        if (
+            not old_safe
+            or not new_safe
+            or old_safe == "broadcast"
+            or new_safe == "broadcast"
+        ):
+            return False
+        if old_safe == new_safe:
+            return True
+
+        old_room = self._request(f"rooms/{old_safe}")
+        if old_room is None:
+            return False
+
+        old_messages = self._request(f"messages/chan_{old_safe}")
+        self._request(f"rooms/{new_safe}", method="PUT", data=old_room)
+        if isinstance(old_messages, dict):
+            self._request(f"messages/chan_{new_safe}", method="PUT", data=old_messages)
+        self._request(f"rooms/{old_safe}", method="DELETE")
+        self._request(f"messages/chan_{old_safe}", method="DELETE")
+        return True
 
     def _mark_seen(self, path: str, key: str):
         marker = f"{path}:{key}"
@@ -233,7 +296,9 @@ class FirebaseTransport:
             out["from_id"] = out["fromId"]
 
         if not out.get("fromName"):
-            out["fromName"] = str(getattr(self.identity, "username", "unknown") or "unknown")
+            out["fromName"] = str(
+                getattr(self.identity, "username", "unknown") or "unknown"
+            )
         if not out.get("from_name"):
             out["from_name"] = out["fromName"]
 
@@ -246,7 +311,11 @@ class FirebaseTransport:
                 if last_ts > 0:
                     data = self._request(
                         path,
-                        params={"orderBy": '"ts"', "startAt": max(0.0, last_ts - 0.001), "limitToLast": 250},
+                        params={
+                            "orderBy": '"ts"',
+                            "startAt": max(0.0, last_ts - 0.001),
+                            "limitToLast": 250,
+                        },
                     )
                 else:
                     data = self._request(
@@ -370,6 +439,14 @@ class FirebaseTransport:
             return data
         return None
 
+    def resolve_username(self, username: str) -> str | None:
+        data = self._request(f"users/{username}")
+        if isinstance(data, dict):
+            peer_id = data.get("peer_id") or data.get("peerId")
+            if peer_id:
+                return str(peer_id)
+        return None
+
 
 class DirectPeer:
     def __init__(self, on_message: Callable | None = None):
@@ -384,7 +461,9 @@ class DirectPeer:
             self.tcp_server.close()
             await self.tcp_server.wait_closed()
             self.tcp_server = None
-        self.tcp_server = await asyncio.start_server(self._handle_tcp_connection, "0.0.0.0", port)
+        self.tcp_server = await asyncio.start_server(
+            self._handle_tcp_connection, "0.0.0.0", port
+        )
         self.tcp_port = int(self.tcp_server.sockets[0].getsockname()[1])
         return self.tcp_port
 
@@ -401,11 +480,15 @@ class DirectPeer:
         writer.close()
         await writer.wait_closed()
 
-    async def send_tcp(self, ip: str, port: int, msg: dict, timeout_s: float = 3.0) -> bool:
+    async def send_tcp(
+        self, ip: str, port: int, msg: dict, timeout_s: float = 3.0
+    ) -> bool:
         from .protocol import write_message
 
         try:
-            reader, writer = await asyncio.wait_for(asyncio.open_connection(ip, int(port)), timeout=timeout_s)
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(ip, int(port)), timeout=timeout_s
+            )
             ok = await write_message(writer, msg)
             writer.close()
             await writer.wait_closed()
@@ -413,7 +496,9 @@ class DirectPeer:
         except Exception:
             return False
 
-    async def connect(self, peer_id: str, ip: str, port: int, timeout_s: float = 3.0) -> Connection | None:
+    async def connect(
+        self, peer_id: str, ip: str, port: int, timeout_s: float = 3.0
+    ) -> Connection | None:
         probe = {"type": "ping", "from_id": peer_id, "ts": time.time()}
         ok = await self.send_tcp(ip, port, probe, timeout_s=timeout_s)
         if not ok:
@@ -428,8 +513,19 @@ class DirectPeer:
             try:
                 payload = json.loads(data.decode("utf-8"))
                 if isinstance(payload, dict) and payload.get("kind") == "p2p-probe":
+                    resp = {
+                        "kind": "p2p-probe-ack",
+                        "from_id": self.owner.on_message.__self__.identity.peer_id
+                        if hasattr(self.owner.on_message, "__self__")
+                        else "unknown",
+                    }
+                    self.owner.udp_transport.sendto(json.dumps(resp).encode(), addr)
                     return
-                if isinstance(payload, dict) and payload.get("kind") == "p2p-msg" and isinstance(payload.get("msg"), dict):
+                if (
+                    isinstance(payload, dict)
+                    and payload.get("kind") == "p2p-msg"
+                    and isinstance(payload.get("msg"), dict)
+                ):
                     payload = payload["msg"]
                 if self.owner.on_message and isinstance(payload, dict):
                     self.owner.on_message(payload)
@@ -453,7 +549,9 @@ class DirectPeer:
         if not self.udp_transport:
             return False
         try:
-            payload = json.dumps(msg, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            payload = json.dumps(msg, separators=(",", ":"), ensure_ascii=False).encode(
+                "utf-8"
+            )
             self.udp_transport.sendto(payload, (ip, int(port)))
             return True
         except Exception:
@@ -476,7 +574,9 @@ class HermesClient:
 
     async def connect(self):
         try:
-            self.reader, self.writer = await asyncio.open_connection(self.host, self.port)
+            self.reader, self.writer = await asyncio.open_connection(
+                self.host, self.port
+            )
             return self
         except Exception:
             self.reader = None
@@ -524,7 +624,9 @@ class HolePuncher:
         loop = asyncio.get_running_loop()
         try:
             await loop.sock_sendto(sock, req, (self.stun_host, self.stun_port))
-            data, _ = await asyncio.wait_for(loop.sock_recvfrom(sock, 2048), timeout=max(0.2, self.timeout_s))
+            data, _ = await asyncio.wait_for(
+                loop.sock_recvfrom(sock, 2048), timeout=max(0.5, self.timeout_s / 2)
+            )
         except Exception:
             sock.close()
             return None
@@ -568,26 +670,23 @@ class HolePuncher:
             return None
         return await self._stun_discover(self.direct_peer.udp_port)
 
-    async def punch(self, target_peer_id: str, target_ip: str, target_udp_port: int) -> Connection | None:
+    async def punch(
+        self, target_peer_id: str, target_ip: str, target_udp_port: int
+    ) -> Connection | None:
         if not self.direct_peer.udp_port:
             return None
-
-        my_public = await self._stun_discover(self.direct_peer.udp_port)
-        if not my_public:
-            return None
-
         probe = {
             "kind": "p2p-probe",
             "from_id": getattr(self.hermes, "peer_id", "unknown"),
             "ts": time.time(),
-            "public_ip": my_public[0],
-            "public_port": my_public[1],
         }
-        for _ in range(4):
+        for _ in range(5):
             await self.direct_peer.send_udp(target_ip, int(target_udp_port), probe)
-            await asyncio.sleep(0.08)
+            await asyncio.sleep(0.1)
 
-        return Connection(peer_id=target_peer_id, kind="udp", ip=target_ip, port=int(target_udp_port))
+        return Connection(
+            peer_id=target_peer_id, kind="udp", ip=target_ip, port=int(target_udp_port)
+        )
 
 
 class TransportManager:
@@ -617,6 +716,8 @@ class TransportManager:
             "port": None,
             "direct_port": None,
             "udp_port": None,
+            "stun_ip": None,
+            "stun_port": None,
             "last_transport": None,
             "hermes_connected": False,
         }
@@ -626,16 +727,32 @@ class TransportManager:
         self._on_message = callback
         self.direct_peer.on_message = callback
 
+    def resolve_direct_target(self, target: str) -> str:
+        raw = str(target or "").strip()
+        if not raw or raw.startswith("@") or raw == "*":
+            return raw
+        if self.fb.get_peer_presence(raw):
+            return raw
+        resolved = self.fb.resolve_username(raw)
+        return resolved or raw
+
     async def initialize(self, listen_port: int | None = None) -> bool:
         self.status["direct_port"] = await self.direct_peer.listen_tcp(listen_port or 0)
         self.status["port"] = self.status["direct_port"]
         self.status["udp_port"] = await self.direct_peer.listen_udp(0)
 
+        public_ep = await self.holepuncher.discover_public_endpoint()
+        if public_ep:
+            self.status["stun_ip"], self.status["stun_port"] = public_ep
+            logger.info(
+                f"Discovered public endpoint: {self.status['stun_ip']}:{self.status['stun_port']}"
+            )
+
         try:
             with urllib.request.urlopen("https://api.ipify.org", timeout=5) as resp:
                 self.status["ip"] = resp.read().decode("utf-8")
         except Exception:
-            self.status["ip"] = "127.0.0.1"
+            self.status["ip"] = self.status["stun_ip"] or "127.0.0.1"
 
         try:
             await self.hermes.connect()
@@ -649,13 +766,12 @@ class TransportManager:
         if not self.status.get("ip") or not self.status.get("direct_port"):
             return
 
-        stun_ep = None
         self.fb.update_presence(
             self.status["ip"],
             int(self.status["direct_port"]),
             udp_port=self.status.get("udp_port"),
-            stun_ip=(stun_ep[0] if stun_ep else None),
-            stun_port=(stun_ep[1] if stun_ep else None),
+            stun_ip=self.status.get("stun_ip"),
+            stun_port=self.status.get("stun_port"),
         )
 
     async def authenticate(self, u, p):
@@ -664,33 +780,40 @@ class TransportManager:
     async def join_channel(self, name, password=None) -> dict:
         res = await self.fb.join_room(name, password)
         if res.get("ok"):
-            history = await self.fb.fetch_history(res["path"], limit=10)
-            for m in history:
-                if self._on_message:
-                    self._on_message(m)
             self.fb.listen(res["path"], self._on_message)
         return res
+
+    async def create_channel(self, name: str, password: str | None = None) -> dict:
+        return await self.join_channel(name, password)
+
+    async def delete_channel(self, name: str) -> dict:
+        ok = await self.fb.delete_room(name)
+        return {"ok": bool(ok), "channel": name}
+
+    async def list_channels(self) -> list[str]:
+        return await self.fb.list_rooms()
+
+    async def rename_channel(self, old_name: str, new_name: str) -> dict:
+        ok = await self.fb.rename_room(old_name, new_name)
+        return {"ok": bool(ok), "old": old_name, "new": new_name}
 
     async def start_personal_inbox_listener(self):
         if not getattr(self.identity, "peer_id", None):
             return
         self._inbox_path = f"messages/{self.identity.peer_id}"
-        history = await self.fb.fetch_history(self._inbox_path, limit=20)
-        for m in history:
-            if self._on_message:
-                self._on_message(m)
         self.fb.listen(self._inbox_path, self._on_message)
-
-    async def load_more(self, channel, limit=50):
-        path = self._path_for_target(channel)
-        history = await self.fb.fetch_history(path, limit=limit)
-        for m in history:
-            if self._on_message:
-                self._on_message(m)
 
     async def load_new_messages(self, channel, limit=100):
         path = self._path_for_target(channel)
         history = await self.fb.fetch_new(path, limit=limit)
+        for m in history:
+            if self._on_message:
+                self._on_message(m)
+        return len(history)
+
+    async def load_more(self, channel, limit=100):
+        path = self._path_for_target(channel)
+        history = await self.fb.fetch_history(path, limit=limit)
         for m in history:
             if self._on_message:
                 self._on_message(m)
@@ -707,26 +830,13 @@ class TransportManager:
         if raw.startswith("@"):
             raw = "@" + raw[1:].lower()
         safe_target = raw.replace("@", "chan_").replace("*", "broadcast")
-        if safe_target == "broadcast":
-            safe_target = "broadcast"
         return f"messages/{safe_target}"
-
-    async def set_listen_port(self, port: int) -> int:
-        self.status["direct_port"] = await self.direct_peer.listen_tcp(port)
-        self.status["port"] = self.status["direct_port"]
-        self.update_presence()
-        return int(self.status["direct_port"])
-
-    async def create_random_listen_port(self) -> int:
-        return await self.set_listen_port(0)
 
     def list_online_peers(self) -> list[dict]:
         data = self.fb.get_all_presence() or {}
         peers = []
         for _, item in data.items():
-            if not isinstance(item, dict):
-                continue
-            if not item.get("online"):
+            if not isinstance(item, dict) or not item.get("online"):
                 continue
             pid = str(item.get("id") or "")
             if not pid or pid == getattr(self.identity, "peer_id", None):
@@ -738,208 +848,202 @@ class TransportManager:
                     "ip": item.get("ip"),
                     "port": item.get("port"),
                     "udp_port": item.get("udp_port"),
+                    "stun_ip": item.get("stun_ip"),
+                    "stun_port": item.get("stun_port"),
                 }
             )
-        peers.sort(key=lambda p: str(p.get("name")))
         return peers
 
-    async def ping_host(self, host: str, port: int, timeout_s: float = 2.0) -> dict:
-        started = time.perf_counter()
-        try:
-            reader, writer = await asyncio.wait_for(asyncio.open_connection(host, int(port)), timeout=timeout_s)
-            writer.close()
-            await writer.wait_closed()
-            elapsed = int((time.perf_counter() - started) * 1000)
-            return {"ok": True, "host": host, "port": int(port), "latency_ms": elapsed}
-        except Exception as e:
-            elapsed = int((time.perf_counter() - started) * 1000)
-            return {"ok": False, "host": host, "port": int(port), "latency_ms": elapsed, "error": str(e)}
-
-    async def ping_peer(self, peer_id: str) -> dict:
-        presence = self.fb.get_peer_presence(peer_id)
-        if not isinstance(presence, dict):
-            return {"ok": False, "peer_id": peer_id, "error": "peer not found in presence"}
-        ip = presence.get("ip")
-        port = presence.get("port")
-        if not ip or not port:
-            return {"ok": False, "peer_id": peer_id, "error": "peer has no reachable ip/port"}
-        result = await self.ping_host(str(ip), int(port))
-        result["peer_id"] = peer_id
-        return result
-
-    async def resolve_host(self, host: str) -> dict:
-        loop = asyncio.get_running_loop()
-        started = time.perf_counter()
-        try:
-            infos = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-            addrs = sorted({item[4][0] for item in infos if item and item[4]})
-            elapsed = int((time.perf_counter() - started) * 1000)
-            if not addrs:
-                return {"ok": False, "host": host, "latency_ms": elapsed, "error": "no address found"}
-            return {"ok": True, "host": host, "latency_ms": elapsed, "addresses": addrs}
-        except Exception as e:
-            elapsed = int((time.perf_counter() - started) * 1000)
-            return {"ok": False, "host": host, "latency_ms": elapsed, "error": str(e)}
-
-    async def scan_common_ports(self, host: str, ports: list[int] | None = None, timeout_s: float = 0.45) -> dict:
-        if not ports:
-            ports = [22, 53, 80, 123, 135, 139, 443, 445, 3306, 3389, 5432, 6379, 8080]
-
-        async def _probe(p: int):
-            res = await self.ping_host(host, int(p), timeout_s=timeout_s)
-            return int(p), bool(res.get("ok")), int(res.get("latency_ms", 0))
-
-        started = time.perf_counter()
-        results = await asyncio.gather(*[_probe(p) for p in ports], return_exceptions=True)
-        open_ports: list[dict] = []
-        failed = 0
-        for item in results:
-            if isinstance(item, Exception):
-                failed += 1
-                continue
-            port, ok, latency = item
-            if ok:
-                open_ports.append({"port": port, "latency_ms": latency})
-        elapsed = int((time.perf_counter() - started) * 1000)
-        open_ports.sort(key=lambda p: p["port"])
-        return {
-            "ok": True,
-            "host": host,
-            "elapsed_ms": elapsed,
-            "checked": len(ports),
-            "failed_probes": failed,
-            "open_ports": open_ports,
-        }
-
-    async def list_lan_devices(self) -> dict:
-        def _run_arp() -> str:
-            out = subprocess.run(["arp", "-a"], capture_output=True, text=True, timeout=8)
-            if out.returncode != 0 and out.stderr:
-                raise RuntimeError(out.stderr.strip())
-            return out.stdout or ""
-
-        try:
-            output = await asyncio.to_thread(_run_arp)
-        except Exception as e:
-            return {"ok": False, "error": str(e), "devices": []}
-
-        devices = []
-        for line in output.splitlines():
-            match = re.search(r"\(([\d.]+)\)\s+at\s+([0-9a-fA-F:.-]+)", line)
-            if not match:
-                continue
-            ip = match.group(1)
-            mac = match.group(2)
-            hostname = line.split("(", 1)[0].strip() or "unknown"
-            devices.append({"host": hostname, "ip": ip, "mac": mac})
-
-        devices.sort(key=lambda d: d["ip"])
-        return {"ok": True, "count": len(devices), "devices": devices}
-
     async def _send_via_firebase(self, target_id: str, msg: dict) -> bool:
-        raw = str(target_id or "")
-        if raw in {"*", "broadcast", "@broadcast"}:
-            path = "messages/broadcast"
-            ok = await self.fb.send(path, msg)
-            if ok:
-                self.status["last_transport"] = "firebase"
-            return ok
-        if raw.startswith("@"):
-            raw = "@" + raw[1:].lower()
-        safe_target = raw.replace("@", "chan_").replace("*", "broadcast")
-        if safe_target == "broadcast":
-            safe_target = "broadcast"
-        path = f"messages/{safe_target}"
+        path = self._path_for_target(target_id)
         ok = await self.fb.send(path, msg)
         if ok:
             self.status["last_transport"] = "firebase"
         return ok
-
-    async def _send_direct_via_firebase(self, target_id: str, msg: dict) -> bool:
-        target_path = f"messages/{target_id}"
-        ok = await self.fb.send(target_path, msg)
-
-        self_id = getattr(self.identity, "peer_id", None)
-        if self_id and self_id != target_id:
-            await self.fb.send(f"messages/{self_id}", msg)
-
-        if ok:
-            self.status["last_transport"] = "firebase"
-        return ok
-
-    async def _sync_direct_to_firebase(self, target_id: str, msg: dict) -> None:
-        try:
-            await self.fb.send(f"messages/{target_id}", msg)
-            self_id = getattr(self.identity, "peer_id", None)
-            if self_id and self_id != target_id:
-                await self.fb.send(f"messages/{self_id}", msg)
-        except Exception:
-            pass
 
     async def _send_direct_tcp(self, presence: dict, msg: dict) -> bool:
         ip = presence.get("ip")
         port = presence.get("port")
         if not ip or not port:
             return False
-        ok = await self.direct_peer.send_tcp(str(ip), int(port), msg, timeout_s=float(getattr(self.config, "direct_timeout_s", 3)))
+        ok = await self.direct_peer.send_tcp(str(ip), int(port), msg)
         if ok:
             self.status["last_transport"] = "direct_tcp"
         return ok
 
     async def _send_direct_udp(self, target_id: str, presence: dict, msg: dict) -> bool:
-        udp_port = presence.get("udp_port") or presence.get("stun_port")
         ip = presence.get("stun_ip") or presence.get("ip")
-        if not ip or not udp_port:
+        port = presence.get("stun_port") or presence.get("udp_port")
+        if not ip or not port:
             return False
 
-        conn = await self.holepuncher.punch(target_id, str(ip), int(udp_port))
+        punch_req = {
+            "type": "p2p-punch-request",
+            "from_id": self.identity.peer_id,
+            "ip": self.status["stun_ip"],
+            "port": self.status["stun_port"],
+        }
+        await self._send_via_firebase(target_id, punch_req)
+
+        conn = await self.holepuncher.punch(target_id, str(ip), int(port))
         if not conn:
             return False
 
         wrapped = {"kind": "p2p-msg", "msg": msg}
-        ok = await self.direct_peer.send_udp(conn.ip or str(ip), int(conn.port or udp_port), wrapped)
+        ok = await self.direct_peer.send_udp(str(ip), int(port), wrapped)
         if ok:
             self.status["last_transport"] = "udp_holepunch"
         return ok
 
-    async def connect(self, target_id: str) -> Connection:
-        presence = self.fb.get_peer_presence(target_id)
-        if isinstance(presence, dict):
-            if await self._send_direct_tcp(presence, {"type": "ping", "from_id": self.identity.peer_id, "ts": time.time()}):
-                return Connection(peer_id=target_id, kind="direct", ip=presence.get("ip"), port=presence.get("port"))
-            if await self._send_direct_udp(target_id, presence, {"type": "ping", "from_id": self.identity.peer_id, "ts": time.time()}):
-                return Connection(peer_id=target_id, kind="udp", ip=presence.get("ip"), port=presence.get("udp_port"))
-        self.status["last_transport"] = "relay"
-        return Connection(peer_id=target_id, kind="relay")
-
     async def send(self, target_id, msg) -> bool:
-        if not isinstance(target_id, str) or target_id.startswith("@") or target_id == "*":
+        if (
+            not isinstance(target_id, str)
+            or target_id.startswith("@")
+            or target_id == "*"
+        ):
             return await self._send_via_firebase(str(target_id), msg)
 
-        presence = self.fb.get_peer_presence(target_id)
-        if isinstance(presence, dict):
-            if await self._send_direct_tcp(presence, msg):
-                await self._sync_direct_to_firebase(target_id, msg)
-                return True
-            if await self._send_direct_udp(target_id, presence, msg):
-                await self._sync_direct_to_firebase(target_id, msg)
-                return True
+        resolved_target = self.resolve_direct_target(target_id)
+        payload = dict(msg or {})
+        payload["to"] = resolved_target
 
-        return await self._send_direct_via_firebase(target_id, msg)
+        presence = self.fb.get_peer_presence(resolved_target)
+        if isinstance(presence, dict):
+            if await self._send_direct_tcp(presence, payload):
+                return True
+            if await self._send_direct_udp(resolved_target, presence, payload):
+                return True
+        return await self._send_via_firebase(resolved_target, payload)
 
     async def broadcast(self, msg) -> bool:
-        ok = await self.fb.send("messages/broadcast", msg)
-        if ok:
-            self.status["last_transport"] = "firebase"
-        return ok
+        return await self._send_via_firebase("@broadcast", msg)
 
-    async def send_raw(self, host: str, port: int, text: str) -> bool:
+    async def set_listen_port(self, port: int) -> int:
+        bound = await self.direct_peer.listen_tcp(int(port))
+        self.status["direct_port"] = int(bound)
+        self.status["port"] = int(bound)
+        self.update_presence()
+        return int(bound)
+
+    async def create_random_listen_port(self) -> int:
+        return await self.set_listen_port(0)
+
+    async def ping_peer(self, peer_id: str) -> dict:
+        resolved = self.resolve_direct_target(peer_id)
+        presence = self.fb.get_peer_presence(resolved)
+        if not isinstance(presence, dict):
+            return {
+                "ok": False,
+                "error": "peer offline or unknown",
+                "peer_id": resolved,
+            }
+        host = presence.get("ip")
+        port = presence.get("port")
+        if not host or not port:
+            return {
+                "ok": False,
+                "error": "peer has no direct endpoint",
+                "peer_id": resolved,
+            }
+        return await self.ping_host(str(host), int(port), peer_id=resolved)
+
+    async def ping_host(self, host: str, port: int, peer_id: str | None = None) -> dict:
+        started = time.time()
         try:
-            _, writer = await asyncio.open_connection(host, int(port))
-            writer.write((text + "\n").encode("utf-8"))
-            await writer.drain()
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, int(port)), timeout=3.0
+            )
             writer.close()
             await writer.wait_closed()
-            return True
-        except Exception:
-            return False
+            return {
+                "ok": True,
+                "peer_id": peer_id,
+                "host": host,
+                "port": int(port),
+                "latency_ms": int((time.time() - started) * 1000),
+            }
+        except Exception as e:
+            return {
+                "ok": False,
+                "peer_id": peer_id,
+                "host": host,
+                "port": int(port),
+                "error": str(e),
+            }
+
+    async def resolve_host(self, host: str) -> dict:
+        started = time.time()
+        try:
+            infos = await asyncio.get_running_loop().getaddrinfo(
+                host, None, proto=socket.IPPROTO_TCP
+            )
+            addrs = []
+            for info in infos:
+                ip = info[4][0]
+                if ip not in addrs:
+                    addrs.append(ip)
+            return {
+                "ok": True,
+                "host": host,
+                "addresses": addrs,
+                "latency_ms": int((time.time() - started) * 1000),
+            }
+        except Exception as e:
+            return {"ok": False, "host": host, "error": str(e)}
+
+    async def scan_common_ports(self, host: str) -> dict:
+        started = time.time()
+        common = [22, 53, 80, 123, 443, 3000, 5000, 5432, 6379, 7777, 8080]
+        open_ports = []
+        checked = 0
+        for port in common:
+            checked += 1
+            res = await self.ping_host(host, port)
+            if res.get("ok"):
+                open_ports.append(
+                    {"port": int(port), "latency_ms": res.get("latency_ms", 0)}
+                )
+        return {
+            "ok": True,
+            "host": host,
+            "checked": checked,
+            "open_ports": open_ports,
+            "elapsed_ms": int((time.time() - started) * 1000),
+        }
+
+    async def list_lan_devices(self) -> dict:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "arp",
+                "-a",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=4.0)
+            text = out.decode("utf-8", errors="ignore")
+            devices = []
+            for line in text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                m = re.search(r"^(.+?) \(([^)]+)\) at ([^ ]+)", line)
+                if not m:
+                    continue
+                host, ip, mac = m.group(1), m.group(2), m.group(3)
+                devices.append({"host": host, "ip": ip, "mac": mac})
+            return {"ok": True, "count": len(devices), "devices": devices}
+        except Exception as e:
+            return {"ok": False, "error": str(e), "devices": []}
+
+    async def send_raw(self, host: str, port: int, text: str) -> bool:
+        payload = {
+            "type": "msg",
+            "id": str(uuid4()),
+            "from_id": self.identity.peer_id,
+            "from_name": self.identity.username,
+            "to": f"{host}:{int(port)}",
+            "body": str(text),
+            "enc": "none",
+            "ts": time.time(),
+        }
+        return await self.direct_peer.send_tcp(str(host), int(port), payload)

@@ -66,9 +66,8 @@ function channelPath(channel) {
 }
 
 async function bootstrap() {
-  const confRes = await fetch('/web-config');
-  const conf = await confRes.json();
-  const app = initializeApp(conf.firebase_web);
+  if (!window.HERMES_FIREBASE_CONFIG) return;
+  const app = initializeApp(window.HERMES_FIREBASE_CONFIG.firebase_web);
   state.db = getDatabase(app);
   const cred = await signInAnonymously(getAuth(app));
   state.userId = cred.user.uid;
@@ -88,9 +87,7 @@ function renderMessages() {
     .slice(-300)
     .map((m) => {
       const me = m.fromId === state.userId;
-      const time = m.ts
-        ? new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        : '';
+      const time = m.ts ? new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
       return `<div class="msg ${me ? 'me' : ''}"><div>${escapeHtml(m.body || '')}</div><div class="meta">${escapeHtml(me ? 'You' : m.fromName || 'Unknown')} ${escapeHtml(time)}</div></div>`;
     })
     .join('');

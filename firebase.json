@@ -1,8 +1,12 @@
 {
+  "database": {
+    "rules": "database.rules.json"
+  },
   "hosting": {
-    "public": "public",
+    "public": "p2pchat/web_ui/public",
     "ignore": [
       "firebase.json",
+      "database.rules.json",
       "**/.*",
       "**/node_modules/**"
     ],
@@ -11,9 +15,17 @@
         "source": "**",
         "destination": "/index.html"
       }
+    ],
+    "headers": [
+      {
+        "source": "**/*.@(js|css)",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public,max-age=300"
+          }
+        ]
+      }
     ]
-  },
-  "database": {
-    "rules": "database.rules.json"
   }
 }

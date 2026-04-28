@@ -1,85 +1,46 @@
-# Hermes v0.3.0
+# Hermes
 
-A terminal-first P2P chat application with local relay server, direct peer messaging, Firebase fallback, and WebSocket support.
+Hermes is a terminal-first chat app with Firebase-backed messaging, direct peer messaging, and optional web/TUI frontends.
 
-## Quick Start
+It is built for quick local use, but you can also host the web client with Firebase Hosting.
 
-Download the bundle from releases, extract it, and run:
+## What you get
 
-```
-./hermes
-```
-
-Or install from source:
-
-```
-git clone <repo>
-cd hermes
-./scripts/install_unix.sh
-```
-
-## Features
-
-### Messaging
-- Terminal client with interactive menu
-- Direct TCP/UDP peer messaging
-- Firebase fallback for reliability
-- RSA and Fernet encryption
-- Channel-based messaging
-
-### Extras
-- Message reactions
-- Typing indicators
-- Read receipts
-- File sharing
-- User profiles
-- Channel administration
-- Markdown formatting
-- WebSocket server
-
-## Requirements
-
-- Python 3.10+
-- cryptography
-- flask
-- websockets
+- Terminal chat client (`hermes`)
+- Textual TUI mode (`hermes --tui`)
+- Web UI (`web-ui --port 8080`)
+- Relay server (`hermes-server --port 7777`)
+- Channel tools (create, rename, delete, list)
+- Direct messages, channel messages, and broadcast
+- Network diagnostics (`--doctor`, ping, resolve, scan, LAN)
 
 ## Install
 
-No venv (system Python):
+Use your own virtual environment:
 
-```
-python3 -m pip install --user .
-```
-
-With venv:
-
-```
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-pip install websockets>=10.0
+```
+
+Or install globally:
+
+```bash
+pip install .
 ```
 
 ## Run
 
-```
-./hermes                    # Terminal client (single command, no manual venv activation)
-./hermes server --port 7777 # Relay server
-./hermes web --port 8080    # Web UI
-```
-
-## Distribution
-
-Create a distributable bundle:
-
-```
-python3 scripts/create_bundle.py --format both
+```bash
+hermes
+hermes --tui
+hermes --doctor
+hermes-server --port 7777
+web-ui --port 8080
 ```
 
-This creates hermes-0.3.0-bundle.zip and hermes-0.3.0-bundle.tar.gz
-
-## Firebase Setup
+## Firebase setup
 
 Edit `~/.p2pchat/config.json`:
 
@@ -89,32 +50,52 @@ Edit `~/.p2pchat/config.json`:
     "backend": "firebase",
     "enabled": true,
     "project_id": "your-project-id",
-    "database_url": "https://your-project.firebaseio.com"
+    "database_url": "https://your-project-id-default-rtdb.firebaseio.com"
   }
 }
 ```
 
-## Terminal Commands
+Then deploy rules and hosting:
 
-- `/help` - Show commands
-- `/join <@chan>` - Join channel
-- `/peers` - List peers
-- `/ping <target>` - Ping peer
-- `/status` - Connection status
-- `/clear` - Clear messages
-- `/quit` - Exit
+```bash
+npx -y firebase-tools@latest deploy
+```
 
-## Project Structure
+Or use the installer helper:
 
-- `p2pchat/main.py` - Terminal entry point
-- `p2pchat/transport.py` - Transport layer
-- `p2pchat/engine.py` - Chat engine
-- `p2pchat/crypto.py` - Encryption
-- `p2pchat/features.py` - Extended features
-- `p2pchat/hermes_server.py` - Relay server
-- `p2pchat/websocket_server.py` - WebSocket server
-- `tests/` - Tests (83 total)
+```bash
+./ih.sh --deploy-firebase
+```
 
-## License
+## Terminal commands
 
-MIT
+Core in-app commands:
+
+- `/help`
+- `/join @channel`
+- `/connect <peer_id_or_username>`
+- `/channels`
+- `/create @channel`
+- `/rename @old @new`
+- `/delete @channel`
+- `/status`
+- `/peers`
+- `/ping <peer|ip:port>`
+- `/resolve <host>`
+- `/scan <host>`
+- `/lan`
+- `/port show|set|random`
+
+## Project layout
+
+- `p2pchat/main.py` CLI entry
+- `p2pchat/ui.py` curses interface
+- `p2pchat/tui.py` textual interface
+- `p2pchat/transport.py` transport and Firebase bridge
+- `p2pchat/web_ui/` Flask + static web client
+- `database.rules.json` Realtime Database rules
+
+## Notes
+
+- If Firebase writes fail, run `hermes --doctor` first.
+- If you run into channel sync issues, check `database.rules.json` deployment status.

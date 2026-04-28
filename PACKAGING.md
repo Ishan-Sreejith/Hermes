@@ -1,64 +1,47 @@
-# Packaging and Distribution
+# Packaging
 
-This project supports two distribution modes:
+Hermes supports both Python package distribution and static web hosting deployment.
 
-1. Python package (`wheel` / `sdist`)
-2. Standalone binaries (`hermes`, `hermes-server`, `web-ui`)
-
-## Quick local install
-
-```bash
-./scripts/install_local.sh
-```
-
-Then run:
-
-```bash
-hermes
-hermes-server --port 7777
-web-ui --port 8080
-```
-
-## Build distributable package files
+## Build Python artifacts
 
 ```bash
 python3 -m pip install --upgrade build
 python3 -m build
 ```
 
-Artifacts:
+Output:
 
 - `dist/p2pchat-<version>.whl`
 - `dist/p2pchat-<version>.tar.gz`
 
-Install from wheel:
+Install wheel:
 
 ```bash
 python3 -m pip install dist/p2pchat-*.whl
 ```
 
-## Build standalone binaries
+## Local install helper
 
 ```bash
-./scripts/build_release.sh
+./ih.sh
 ```
 
-Artifacts:
+This installs the package in `venv/` and creates a `hermes` launcher.
 
-- `dist/hermes`
-- `dist/hermes-server`
-- `dist/web-ui`
+## Firebase hosting package/deploy
 
-Run binaries directly:
+Static assets come from:
+
+- `p2pchat/web_ui/public`
+
+Deploy hosting only:
 
 ```bash
-./dist/hermes
-./dist/hermes-server --port 7777
-./dist/web-ui --port 8080
+./ih.sh --deploy-firebase
 ```
 
-## Notes
+Deploy all configured Firebase resources (rules + hosting):
 
-- Web UI binaries use Firebase-backed web terminal mode.
-- Keep Firebase secrets in local config files only.
-- Do not commit credentials to git.
+```bash
+./ih.sh --deploy-all
+```

@@ -1,62 +1,37 @@
-# Hermes CLI: Global Installation and Usage
+# Hermes CLI Global Use
 
-## Global Install (Recommended)
+If you want `hermes` available from any directory, this is the easiest flow.
 
-If you want to use the `hermes` command from any directory, install globally:
+## Global install
 
-```sh
+```bash
 pip install .
 ```
 
-Or for user-local (no sudo required):
+User-only install (no sudo):
 
-```sh
+```bash
 pip install --user .
 ```
 
-Make sure `~/.local/bin` is on your `$PATH` (for user-local installs):
+If needed:
 
-```sh
+```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-## Running Hermes
+## Commands
 
-- Single-command launcher from repo root (auto-uses `.venv`/`venv` if present):
-  ```sh
-  ./hermes
-  ```
-- Single-command launcher for relay server and web UI:
-  ```sh
-  ./hermes server --port 7777
-  ./hermes web --port 8080
-  ```
-- To start the terminal client:
-  ```sh
-  hermes
-  ```
-- To start the relay server:
-  ```sh
-  hermes-server --port 7777
-  ```
-- To start the web UI:
-  ```sh
-  web-ui --port 8080
-  ```
-
-## Portable Script
-
-If you want to use the venv, you can use the provided scripts:
-
-```sh
-./hermes
-./start.sh
+```bash
+hermes
+hermes --tui
+hermes --doctor
+hermes-server --port 7777
+web-ui --port 8080
 ```
 
-`./hermes` runs without manual activation and will prefer `.venv`/`venv` binaries when available.
+## Common issues
 
-## Troubleshooting
-
-- If you get `command not found: hermes`, make sure you installed with `pip install .` and your `$PATH` is correct.
-- If you get `ModuleNotFoundError`, make sure you installed dependencies with `pip install .` or `pip install -e .`.
-- If you see UI lag or message delay, please report the issue with details.
+- `command not found: hermes` → check your PATH and install target.
+- `ModuleNotFoundError` → reinstall with `pip install -e .`.
+- Firebase errors → run `hermes --doctor` and confirm database URL/rules.

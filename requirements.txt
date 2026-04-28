@@ -1,0 +1,8 @@
+flask
+textual
+cryptography
+urllib3
+asyncio
+pathlib
+uuid
+sqlite3

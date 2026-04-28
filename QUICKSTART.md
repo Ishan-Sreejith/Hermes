@@ -1,4 +1,6 @@
-# Hermes Quick Start
+# Quick Start
+
+If you want the fastest route to a working Hermes setup, use this.
 
 ## 1) Install
 
@@ -7,54 +9,53 @@ cd /Users/ishan/Hermes
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
-pip install -e '.[firebase]'
 ```
 
-## 2) Start relay server
+## 2) Verify environment
 
 ```bash
-hermes-server --port 7777
+hermes --doctor
 ```
 
-## 3) Start web terminal
+If anything is missing, fix it before continuing.
 
-```bash
-web-ui --port 8080
-```
+## 3) Start services
 
-Open `http://localhost:8080`.
-
-## 4) Start terminal client
+Terminal app:
 
 ```bash
 hermes
 ```
 
-## 5) Use common commands
+Optional TUI:
 
-- `/help`
-- `/join <@channel>`
-- `/connect <peer_id>`
-- `/load [n|on|off]`
-- `/status`
-
-## Firebase
-
-If you want Firebase mode, set values in `~/.p2pchat/config.json`:
-
-```json
-{
-  "cloud": {
-    "backend": "firebase",
-    "enabled": true,
-    "project_id": "your-project-id",
-    "database_url": "https://your-project-id-default-rtdb.firebaseio.com"
-  }
-}
+```bash
+hermes --tui
 ```
 
-## Troubleshooting
+Optional web UI:
 
-- Port in use: choose another port.
-- No messages: check active channel and `/status`.
-- Web not loading: verify Firebase config and rules.
+```bash
+web-ui --port 8080
+```
+
+## 4) In-app basics
+
+- `/help`
+- `/join @team`
+- `/connect <peer_or_username>`
+- `/create @team`
+- `/rename @team @newteam`
+- `/delete @newteam`
+
+## 5) Firebase deploy
+
+```bash
+./ih.sh --deploy-firebase
+```
+
+Or full deploy:
+
+```bash
+./ih.sh --deploy-all
+```

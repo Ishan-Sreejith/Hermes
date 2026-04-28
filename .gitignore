@@ -13,9 +13,6 @@ htmlcov/
 p2pchat.egg-info/
 .p2pchat/
 tests/
-
-# Local tooling and editor state
-# I did not use any of these AI agents but their config folders were created by default
 .agents/
 .claude/
 .continue/
@@ -27,22 +24,24 @@ tests/
 skills/
 skills-lock.json
 p2pchat/scratch/
-ih.sh
 path/
 
-# Firebase local state and credentials
 .firebase/
-.firebaserc
 .runtimeconfig.json
 firebase-debug.log
 firebase-debug.*.log
 serviceAccountKey.json
 service-account*.json
 *firebase*credentials*.json
-*firebase*config*.json
 public/firebase-config.js
+p2pchat/web_ui/public/firebase-config.js
+p2pchat/web_ui/firebase-config.js
 
-# Build outputs
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
 build/
 dist/
 venv/
