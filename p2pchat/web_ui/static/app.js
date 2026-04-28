@@ -37,7 +37,9 @@ const el = {
   btnRename: document.getElementById('btn-rename'),
   btnDelete: document.getElementById('btn-delete'),
   btnTheme: document.getElementById('btn-theme'),
+  btnSettings: document.getElementById('btn-settings'),
   settingsOverlay: document.getElementById('settings-overlay'),
+  settingsTitle: document.getElementById('settings-title'),
   settingsName: document.getElementById('settings-name'),
   settingsSave: document.getElementById('settings-save'),
   settingsCancel: document.getElementById('settings-cancel'),
@@ -51,10 +53,16 @@ const el = {
   sendBtn: document.getElementById('send-btn'),
   errorBanner: document.getElementById('error-banner'),
   sidebarToggle: document.getElementById('sidebar-toggle'),
+  sidebarCollapse: document.getElementById('sidebar-collapse'),
   sidebar: document.querySelector('.sidebar'),
+  appShell: document.getElementById('app-shell'),
 };
 
 let modalMode = 'create';
+let settingsMode = 'welcome';
+const uiPrefs = {
+  sidebarCollapsed: localStorage.getItem('hermesSidebarCollapsed') === '1',
+};
 
 function escapeHtml(value) {
   const div = document.createElement('div');
@@ -94,6 +102,11 @@ function updateConnectionUi() {
   }
   const canSend = connected && state.bootstrapped;
   if (el.sendBtn) el.sendBtn.disabled = !canSend;
+}
+
+function applySidebarState() {
+  if (!el.appShell) return;
+  el.appShell.classList.toggle('sidebar-collapsed', !!uiPrefs.sidebarCollapsed);
 }
 
 async function resolveFirebaseWebConfig() {
@@ -159,6 +172,9 @@ async function bootstrap() {
 
 function renderMessages() {
   const msgs = state.chatCache[state.activeTarget] || [];
+  const nearBottom =
+    el.chatMessages.scrollHeight - el.chatMessages.scrollTop - el.chatMessages.clientHeight <
+    120;
   el.chatMessages.innerHTML = msgs
     .slice(-300)
     .map((m) => {
@@ -169,7 +185,9 @@ function renderMessages() {
       return `<div class="msg ${me ? 'me' : ''}"><div>${escapeHtml(m.body || '')}</div><div class="meta">${escapeHtml(me ? 'You' : m.fromName || 'Unknown')} ${escapeHtml(time)}</div></div>`;
     })
     .join('');
-  el.chatMessages.scrollTop = el.chatMessages.scrollHeight;
+  if (nearBottom) {
+    el.chatMessages.scrollTop = el.chatMessages.scrollHeight;
+  }
 }
 
 function updateChatList(channels) {
@@ -217,6 +235,7 @@ function switchTarget(target) {
   ensureChannelListener(normalized);
   renderMessages();
   refreshRooms();
+  if (window.innerWidth <= 860) el.sidebar.classList.remove('open');
 }
 
 async function refreshRooms() {
@@ -363,9 +382,33 @@ function wireEvents() {
     const current = document.documentElement.getAttribute('data-theme') || 'dark';
     document.documentElement.setAttribute('data-theme', current === 'dark' ? 'light' : 'dark');
   });
+  if (el.btnSettings) {
+    el.btnSettings.addEventListener('click', () => {
+      settingsMode = 'edit';
+      if (el.settingsTitle) el.settingsTitle.textContent = 'Settings';
+      if (el.settingsCancel) el.settingsCancel.textContent = 'Close';
+      if (el.settingsSave) el.settingsSave.textContent = 'Save';
+      if (el.settingsName) el.settingsName.value = state.username || '';
+      el.settingsOverlay.classList.add('open');
+      el.settingsName?.focus();
+    });
+  }
   if (el.sidebarToggle) {
     el.sidebarToggle.addEventListener('click', () => {
-      el.sidebar.classList.toggle('open');
+      if (window.innerWidth <= 860) {
+        el.sidebar.classList.toggle('open');
+      } else {
+        uiPrefs.sidebarCollapsed = !uiPrefs.sidebarCollapsed;
+        localStorage.setItem('hermesSidebarCollapsed', uiPrefs.sidebarCollapsed ? '1' : '0');
+        applySidebarState();
+      }
+    });
+  }
+  if (el.sidebarCollapse) {
+    el.sidebarCollapse.addEventListener('click', () => {
+      uiPrefs.sidebarCollapsed = true;
+      localStorage.setItem('hermesSidebarCollapsed', '1');
+      applySidebarState();
     });
   }
   if (el.sidebar) {
@@ -376,25 +419,33 @@ function wireEvents() {
   }
 
   el.settingsSave.addEventListener('click', () => {
-    state.username = String(el.settingsName.value || '').trim();
+    const nextName = String(el.settingsName.value || '').trim();
+    state.username = nextName || 'Anon';
     localStorage.setItem('hermesUsername', state.username);
     el.settingsOverlay.classList.remove('open');
     bootstrap();
   });
   if (el.settingsCancel) {
     el.settingsCancel.addEventListener('click', () => {
-      state.username = state.username || 'Anon';
-      localStorage.setItem('hermesUsername', state.username);
       el.settingsOverlay.classList.remove('open');
-      bootstrap();
+      if (settingsMode === 'welcome') {
+        state.username = state.username || 'Anon';
+        localStorage.setItem('hermesUsername', state.username);
+        bootstrap();
+      }
     });
   }
 }
 
 wireEvents();
+applySidebarState();
 updateConnectionUi();
 if (state.username) {
   bootstrap();
 } else {
+  settingsMode = 'welcome';
+  if (el.settingsTitle) el.settingsTitle.textContent = 'Welcome';
+  if (el.settingsCancel) el.settingsCancel.textContent = 'Skip';
+  if (el.settingsSave) el.settingsSave.textContent = 'Enter';
   el.settingsOverlay.classList.add('open');
 }

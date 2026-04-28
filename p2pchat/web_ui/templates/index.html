@@ -13,30 +13,31 @@
     />
     <style>
       :root {
-        --bg: #0b1016;
-        --surface: #121922;
-        --surface-2: #1a2432;
-        --border: #2a3544;
-        --text: #e7edf7;
-        --muted: #9fb0c8;
-        --accent: #3a8bfd;
-        --accent-2: #53a4ff;
-        --danger: #f05a6c;
+        --bg: #0f1115;
+        --surface: #171a21;
+        --surface-2: #212733;
+        --border: #2a3140;
+        --text: #eceff4;
+        --muted: #9aa4b7;
+        --accent: #10a37f;
+        --accent-2: #16b28d;
+        --danger: #d65c5c;
       }
       :root[data-theme='light'] {
-        --bg: #f4f7fc;
+        --bg: #f3f4f6;
         --surface: #ffffff;
-        --surface-2: #ecf2fb;
-        --border: #d8e2ef;
+        --surface-2: #f3f6fb;
+        --border: #d7deea;
         --text: #1f2937;
-        --muted: #637389;
-        --accent: #2563eb;
-        --accent-2: #3b82f6;
-        --danger: #dc3545;
+        --muted: #667085;
+        --accent: #10a37f;
+        --accent-2: #0d8d6f;
+        --danger: #c83f4a;
       }
       * { box-sizing: border-box; }
-      html, body { margin: 0; height: 100%; font-family: 'Plus Jakarta Sans', sans-serif; background: var(--bg); color: var(--text); }
-      .app { display: grid; grid-template-columns: 320px 1fr; height: 100vh; }
+      html, body { margin: 0; height: 100%; font-family: 'Plus Jakarta Sans', sans-serif; background: var(--bg); color: var(--text); overflow: hidden; }
+      .app { display: grid; grid-template-columns: 300px minmax(0,1fr); height: 100dvh; transition: grid-template-columns .2s ease; }
+      .app.sidebar-collapsed { grid-template-columns: 0 minmax(0,1fr); }
       .sidebar { background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
       .sidebar.open { display: flex; }
       .sidebar-header { padding: 20px; border-bottom: 1px solid var(--border); }
@@ -50,21 +51,25 @@
       .btn:disabled { opacity: 0.6; cursor: not-allowed; }
       .btn-danger { border-color: color-mix(in oklab, var(--danger) 40%, var(--border)); }
       .chat-list { overflow: auto; padding: 10px; }
-      .chat-card { border: 1px solid transparent; border-radius: 12px; padding: 12px; margin-bottom: 8px; cursor: pointer; }
+      .chat-card { border: 1px solid transparent; border-radius: 10px; padding: 12px; margin-bottom: 8px; cursor: pointer; }
       .chat-card:hover { background: var(--surface-2); }
       .chat-card.active { border-color: var(--accent); background: color-mix(in oklab, var(--accent) 12%, var(--surface-2)); }
-      .main { display: grid; grid-template-rows: 68px 1fr 76px; }
+      .main { display: grid; grid-template-rows: 68px minmax(0,1fr); min-height: 0; }
       .chat-header { padding: 0 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; background: var(--surface); }
       .chat-header-left { display: flex; align-items: center; gap: 10px; }
-      .messages { overflow: auto; padding: 18px; display: flex; flex-direction: column; gap: 8px; }
+      .chat-stage { min-height: 0; position: relative; display: flex; flex-direction: column; }
+      .messages { overflow: auto; padding: 18px; padding-bottom: 120px; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
       .msg { max-width: 70%; border-radius: 14px; padding: 10px 12px; background: var(--surface-2); }
-      .msg.me { align-self: end; background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: white; }
+      .msg.me { align-self: end; background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; }
       .meta { font-size: 11px; color: var(--muted); }
+      .header-actions { display: flex; align-items: center; gap: 8px; }
       .top-banner { display: none; padding: 10px 14px; font-size: 12px; border-bottom: 1px solid var(--border); color: #fff; background: #913640; }
       .top-banner.open { display: block; }
-      .composer { border-top: 1px solid var(--border); display: flex; gap: 10px; padding: 14px 16px; background: var(--surface); }
-      #message-input { flex: 1; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); color: var(--text); padding: 12px; font-size: 14px; }
-      #sidebar-toggle { display: none; }
+      .composer-wrap { position: absolute; left: 0; right: 0; bottom: 0; padding: 0 18px 16px; pointer-events: none; }
+      .composer { pointer-events: auto; border: 1px solid var(--border); display: flex; gap: 10px; padding: 10px; background: color-mix(in oklab, var(--surface) 88%, #000 12%); border-radius: 14px; box-shadow: 0 12px 30px rgba(0,0,0,0.25); backdrop-filter: blur(6px); }
+      #message-input { flex: 1; border: 1px solid transparent; border-radius: 10px; background: transparent; color: var(--text); padding: 12px; font-size: 14px; outline: none; }
+      #message-input:focus { border-color: var(--accent); background: color-mix(in oklab, var(--surface-2) 80%, transparent); }
+      #sidebar-toggle, #sidebar-collapse { display: inline-flex; }
       .badge { margin-left: 6px; font-size: 10px; background: var(--danger); color: #fff; border-radius: 999px; padding: 1px 6px; }
       .modal { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0, 0, 0, 0.6); }
       .modal.open { display: flex; }
@@ -73,20 +78,21 @@
       .field input { width: 100%; border: 1px solid var(--border); border-radius: 10px; padding: 10px; background: var(--bg); color: var(--text); }
       .modal-actions { margin-top: 14px; display: flex; justify-content: flex-end; gap: 8px; }
       @media (max-width: 860px) {
-        .app { grid-template-columns: 1fr; }
+        .app { grid-template-columns: 1fr; height: 100dvh; }
         .sidebar { display: none; position: fixed; inset: 0 auto 0 0; width: min(92vw, 340px); z-index: 30; box-shadow: 0 0 0 100vmax rgba(0,0,0,0.45); }
-        #sidebar-toggle { display: inline-flex; }
+        #sidebar-collapse { display: none; }
       }
     </style>
   </head>
   <body>
-    <div class="app">
+    <div class="app" id="app-shell">
       <aside class="sidebar">
         <div class="sidebar-header">
           <div class="sidebar-title">Hermes</div>
           <div class="status" id="connection-text">Connecting...</div>
         </div>
         <div class="toolbar">
+          <button class="btn" id="sidebar-collapse">Hide</button>
           <button class="btn" id="btn-create">New</button>
           <button class="btn" id="btn-rename">Rename</button>
           <button class="btn btn-danger" id="btn-delete">Delete</button>
@@ -103,24 +109,31 @@
             <div class="meta" id="transport-info">Cloud Relay</div>
             </div>
           </div>
-          <button class="btn" id="btn-theme">Theme</button>
+          <div class="header-actions">
+            <button class="btn" id="btn-settings">Settings</button>
+            <button class="btn" id="btn-theme">Theme</button>
+          </div>
         </header>
-        <div class="top-banner" id="error-banner"></div>
-        <section class="messages" id="chat-messages"></section>
-        <footer class="composer">
-          <input id="message-input" placeholder="Type message..." maxlength="800" />
-          <button class="btn" id="send-btn" disabled>Send</button>
-        </footer>
+        <section class="chat-stage">
+          <div class="top-banner" id="error-banner"></div>
+          <section class="messages" id="chat-messages"></section>
+          <div class="composer-wrap">
+            <footer class="composer">
+              <input id="message-input" placeholder="Message Hermes..." maxlength="800" />
+              <button class="btn" id="send-btn" disabled>Send</button>
+            </footer>
+          </div>
+        </section>
       </main>
     </div>
 
     <div class="modal" id="settings-overlay">
       <div class="modal-card">
-        <h3>Welcome</h3>
+        <h3 id="settings-title">Welcome</h3>
         <div class="field"><input id="settings-name" placeholder="Username" maxlength="20" /></div>
         <div class="modal-actions">
           <button class="btn" id="settings-cancel">Skip</button>
-          <button class="btn" id="settings-save">Enter</button>
+          <button class="btn" id="settings-save">Save</button>
         </div>
       </div>
     </div>
