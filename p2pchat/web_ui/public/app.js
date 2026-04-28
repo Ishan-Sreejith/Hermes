@@ -96,23 +96,36 @@ function updateConnectionUi() {
   if (el.sendBtn) el.sendBtn.disabled = !canSend;
 }
 
+async function resolveFirebaseWebConfig() {
+  const fromWindow = window?.HERMES_FIREBASE_CONFIG?.firebase_web;
+  if (fromWindow && typeof fromWindow === 'object') {
+    return fromWindow;
+  }
+  try {
+    const confRes = await fetch('/web-config');
+    if (!confRes.ok) return null;
+    const contentType = String(confRes.headers.get('content-type') || '').toLowerCase();
+    if (!contentType.includes('application/json')) {
+      return null;
+    }
+    const conf = await confRes.json();
+    return conf?.firebase_web || null;
+  } catch (err) {
+    return null;
+  }
+}
+
 async function bootstrap() {
   if (state.bootstrapped && state.db) return;
   if (state.bootstrapped && !state.db) {
     state.bootstrapped = false;
   }
-  const confRes = await fetch('/web-config');
-  if (!confRes.ok) {
-    setBanner(`Config fetch failed (${confRes.status})`);
-    return;
-  }
-  const conf = await confRes.json();
-  const firebaseWeb = conf?.firebase_web || {};
+  const firebaseWeb = (await resolveFirebaseWebConfig()) || {};
   if (!firebaseWeb.apiKey || String(firebaseWeb.apiKey).startsWith('YOUR_')) {
-    setBanner('Firebase config is not set. Configure FIREBASE_* env vars first.');
+    setBanner('Firebase config is not set. Update firebase-config.js or FIREBASE_* env vars.');
     return;
   }
-  const app = initializeApp(conf.firebase_web);
+  const app = initializeApp(firebaseWeb);
   state.db = getDatabase(app);
   const auth = getAuth(app);
   let cred;

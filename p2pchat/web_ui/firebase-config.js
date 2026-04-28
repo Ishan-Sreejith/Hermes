@@ -1,11 +1,11 @@
 window.HERMES_FIREBASE_CONFIG = {
   "firebase_web": {
-    "apiKey": "YOUR_API_KEY",
-    "authDomain": "YOUR_PROJECT_ID.firebaseapp.com",
-    "databaseURL": "https://YOUR_PROJECT_ID.firebaseio.com",
-    "projectId": "YOUR_PROJECT_ID",
-    "storageBucket": "YOUR_PROJECT_ID.appspot.com",
-    "messagingSenderId": "YOUR_SENDER_ID",
-    "appId": "YOUR_APP_ID"
+    "apiKey": "AIzaSyDnrfyzolBawWJBkQCbtsDCeIzM4NwLta0",
+    "authDomain": "hermes-1bcc8.firebaseapp.com",
+    "databaseURL": "https://hermes-1bcc8-default-rtdb.asia-southeast1.firebasedatabase.app",
+    "projectId": "hermes-1bcc8",
+    "storageBucket": "hermes-1bcc8.firebasestorage.app",
+    "messagingSenderId": "400185148743",
+    "appId": "1:400185148743:web:8689241bc30d9cb6797862"
   }
 };
