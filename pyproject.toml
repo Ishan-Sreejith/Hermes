@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "p2pchat"
-version = "0.3.0"
+version = "0.3.3"
 description = "Terminal-first P2P chat app with Hermes relay and localhost web UI"
 requires-python = ">=3.10"
 dependencies = [

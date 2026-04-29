@@ -100,7 +100,7 @@ def main():
     parser.add_argument("--version", action="store_true", help="Show version and exit")
     args = parser.parse_args()
     if args.version:
-        print("0.3.0")
+        print("0.3.3")
         return
     debug = args.debug or _bool_env("HERMES_WEB_DEBUG", False)
     app.run(host=args.host, port=args.port, debug=debug, use_reloader=debug, threaded=True)

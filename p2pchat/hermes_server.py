@@ -258,7 +258,7 @@ def main():
     parser.add_argument("--version", action="store_true", help="Show version and exit")
     args = parser.parse_args()
     if args.version:
-        print("0.3.0")
+        print("0.3.3")
         return
     asyncio.run(amain(args.host, args.port))
 
