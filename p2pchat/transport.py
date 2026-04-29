@@ -430,6 +430,8 @@ class FirebaseTransport:
             "id": self.identity.peer_id,
             "name": self.identity.username,
             "online": True,
+            "status": "online",
+            "ts": time.time(),
             "public": True,
             "updatedAt": {".sv": "timestamp"},
             "ip": ip,

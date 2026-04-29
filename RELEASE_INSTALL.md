@@ -18,8 +18,8 @@ bash /tmp/install_hermes.sh --system-wide
 No-venv global-style install (recommended if you want `hermes` like npm commands):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Ishan-Sreejith/Hermes/main/scripts/install_global_unix.sh -o /tmp/install_hermes_global.sh
-bash /tmp/install_hermes_global.sh
+curl -fsSL https://raw.githubusercontent.com/Ishan-Sreejith/Hermes/main/unix.sh -o /tmp/unix.sh
+bash /tmp/unix.sh
 ```
 
 ## Windows (PowerShell)
