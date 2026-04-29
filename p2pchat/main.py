@@ -326,8 +326,14 @@ class CLIApp:
         self.engine.set_loop(loop)
         self.transport.update_presence()
         await self.transport.start_personal_inbox_listener()
-        await self.engine.join_channel(initial_channel)
-        self.ui.active_channel = initial_channel
+        channel = initial_channel or self.config.ui.last_channel or "@broadcast"
+        await self.engine.join_channel(channel)
+        self.config.ui.last_channel = channel
+        try:
+            self.config_mgr.save(self.config)
+        except Exception:
+            pass
+        self.ui.active_channel = channel
         self.ui._dirty.set()
 
         while True:
@@ -448,6 +454,11 @@ def main():
         + __import__("p2pchat.ui", fromlist=["VERSION"]).VERSION
     )
     parser.add_argument(
+        "--version",
+        action="store_true",
+        help="Show version and exit",
+    )
+    parser.add_argument(
         "--listen-port",
         type=int,
         default=None,
@@ -465,6 +476,10 @@ def main():
         help="Run environment and connectivity diagnostics",
     )
     args = parser.parse_args()
+
+    if args.version:
+        print(__import__("p2pchat.ui", fromlist=["VERSION"]).VERSION)
+        return
 
     if args.doctor:
         try:

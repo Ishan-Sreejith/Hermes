@@ -18,6 +18,8 @@ class UIConfig:
     show_peer_id: bool = False
     compact_tui: bool = True
     hosted_web_ui_url: str | None = None
+    high_contrast: bool = False
+    last_channel: str | None = None
 
 
 @dataclass
@@ -39,7 +41,9 @@ class CloudConfig:
 @dataclass
 class Config:
     transport_mode: str = "firebase"
-    fallback_order: list[str] = field(default_factory=lambda: ["firebase", "direct", "holepunch"])
+    fallback_order: list[str] = field(
+        default_factory=lambda: ["firebase", "direct", "holepunch"]
+    )
     direct_timeout_s: int = 3
     holepunch_timeout_s: int = 5
     hermes_host: str = "127.0.0.1"
@@ -63,7 +67,9 @@ class ConfigManager:
                 raw = json.loads(self.path.read_text())
                 return Config(
                     transport_mode=raw.get("transport_mode", "firebase"),
-                    fallback_order=raw.get("fallback_order", ["firebase", "direct", "holepunch"]),
+                    fallback_order=raw.get(
+                        "fallback_order", ["firebase", "direct", "holepunch"]
+                    ),
                     direct_timeout_s=raw.get("direct_timeout_s", 3),
                     holepunch_timeout_s=raw.get("holepunch_timeout_s", 5),
                     hermes_host=raw.get("hermes_host", "127.0.0.1"),

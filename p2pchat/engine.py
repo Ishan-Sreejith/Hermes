@@ -42,6 +42,7 @@ class Engine:
 
     def __post_init__(self):
         self.storage = Storage(self.home)
+        self._outbox_task: asyncio.Task | None = None
 
     def set_ui(self, ui: Any):
         self.ui = ui
@@ -52,6 +53,44 @@ class Engine:
 
     def set_loop(self, loop: asyncio.AbstractEventLoop):
         self.loop = loop
+        if self.loop and self._outbox_task is None:
+            self._outbox_task = self.loop.create_task(self._outbox_worker())
+
+    async def _outbox_worker(self):
+        backoff_s = 2.0
+        while True:
+            try:
+                pending = self.storage.list_outbox(limit=50)
+                if not pending:
+                    await asyncio.sleep(1.0)
+                    continue
+                for msg in pending:
+                    mid = msg.get("id")
+                    if not mid:
+                        continue
+                    tries = int(msg.get("tries", 0))
+                    if tries >= 10:
+                        continue
+                    ok = False
+                    target = msg.get("channel") or msg.get("to") or "@broadcast"
+                    try:
+                        ok = await self.transport.send(target, msg)
+                    except Exception as exc:
+                        self.storage.update_outbox_attempt(mid, tries + 1, str(exc))
+                    else:
+                        if ok:
+                            self.storage.remove_outbox(mid)
+                            self.storage.update_message_state(mid, "sent")
+                            if self.ui:
+                                self.ui.set_message_state(mid, "sent")
+                        else:
+                            self.storage.update_outbox_attempt(
+                                mid, tries + 1, "send failed"
+                            )
+                    await asyncio.sleep(0.05)
+                await asyncio.sleep(backoff_s)
+            except Exception:
+                await asyncio.sleep(backoff_s)
 
     async def send_direct(self, peer_id: str, text: str, msg_id: str | None = None):
         """Send a direct message to a peer with error handling."""
@@ -64,6 +103,8 @@ class Engine:
 
             if not text:
                 logger.warning("send_direct: empty message text")
+                if msg_id and self.ui:
+                    self.ui.set_message_state(msg_id, "failed")
                 return None
 
             body, enc = self.crypto.encrypt(
@@ -85,12 +126,15 @@ class Engine:
             self.storage.save_message(msg)
 
             ok = await self.transport.send(peer_id, msg)
-            state = "sent" if ok else "failed"
-            self.storage.update_message_state(mid, state)
-            if self.ui:
-                self.ui.set_message_state(mid, state)
-
-            if not ok:
+            if ok:
+                self.storage.update_message_state(mid, "sent")
+                if self.ui:
+                    self.ui.set_message_state(mid, "sent")
+            else:
+                self.storage.update_message_state(mid, "failed")
+                self.storage.enqueue_outbox({**msg, "tries": 1})
+                if self.ui:
+                    self.ui.set_message_state(mid, "failed")
                 logger.warning(f"send_direct failed to {peer_id}")
 
             return msg
@@ -111,6 +155,8 @@ class Engine:
 
             if not text:
                 logger.warning("send_channel: empty message text")
+                if msg_id and self.ui:
+                    self.ui.set_message_state(msg_id, "failed")
                 return None
 
             body, enc = self.crypto.encrypt(
@@ -133,12 +179,15 @@ class Engine:
             self.storage.save_message(msg)
 
             ok = await self.transport.send(channel, msg)
-            state = "sent" if ok else "failed"
-            self.storage.update_message_state(mid, state)
-            if self.ui:
-                self.ui.set_message_state(mid, state)
-
-            if not ok:
+            if ok:
+                self.storage.update_message_state(mid, "sent")
+                if self.ui:
+                    self.ui.set_message_state(mid, "sent")
+            else:
+                self.storage.update_message_state(mid, "failed")
+                self.storage.enqueue_outbox({**msg, "tries": 1})
+                if self.ui:
+                    self.ui.set_message_state(mid, "failed")
                 logger.warning(f"send_channel failed to {channel}")
 
             return msg
@@ -155,6 +204,8 @@ class Engine:
 
             if not text:
                 logger.warning("broadcast: empty message text")
+                if msg_id and self.ui:
+                    self.ui.set_message_state(msg_id, "failed")
                 return None
 
             body, enc = self.crypto.encrypt(text, "*", self.config.crypto.default_mode)
@@ -175,12 +226,15 @@ class Engine:
             self.storage.save_message(msg)
 
             ok = await self.transport.broadcast(msg)
-            state = "sent" if ok else "failed"
-            self.storage.update_message_state(mid, state)
-            if self.ui:
-                self.ui.set_message_state(mid, state)
-
-            if not ok:
+            if ok:
+                self.storage.update_message_state(mid, "sent")
+                if self.ui:
+                    self.ui.set_message_state(mid, "sent")
+            else:
+                self.storage.update_message_state(mid, "failed")
+                self.storage.enqueue_outbox({**msg, "tries": 1})
+                if self.ui:
+                    self.ui.set_message_state(mid, "failed")
                 logger.warning("broadcast failed")
 
             return msg

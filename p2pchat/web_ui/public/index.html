@@ -13,14 +13,14 @@
     />
     <style>
       :root {
-        --bg: #0f1115;
-        --surface: #171a21;
-        --surface-2: #212733;
-        --border: #2a3140;
+        --bg: #111315;
+        --surface: #1a1d21;
+        --surface-2: #242931;
+        --border: #323843;
         --text: #eceff4;
         --muted: #9aa4b7;
-        --accent: #10a37f;
-        --accent-2: #16b28d;
+        --accent: #3b82f6;
+        --accent-2: #2563eb;
         --danger: #d65c5c;
       }
       :root[data-theme='light'] {
@@ -52,6 +52,9 @@
       .btn-danger { border-color: color-mix(in oklab, var(--danger) 40%, var(--border)); }
       .chat-list { overflow: auto; padding: 10px; }
       .chat-card { border: 1px solid transparent; border-radius: 10px; padding: 12px; margin-bottom: 8px; cursor: pointer; }
+      .chat-card-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .chat-menu-trigger { border: 0; background: transparent; color: var(--muted); width: 24px; height: 24px; border-radius: 6px; cursor: pointer; font-weight: 800; line-height: 1; }
+      .chat-menu-trigger:hover { background: var(--surface-2); color: var(--text); }
       .chat-card:hover { background: var(--surface-2); }
       .chat-card.active { border-color: var(--accent); background: color-mix(in oklab, var(--accent) 12%, var(--surface-2)); }
       .main { display: grid; grid-template-rows: 68px minmax(0,1fr); min-height: 0; }
@@ -71,12 +74,23 @@
       #message-input:focus { border-color: var(--accent); background: color-mix(in oklab, var(--surface-2) 80%, transparent); }
       #sidebar-toggle, #sidebar-collapse { display: inline-flex; }
       .badge { margin-left: 6px; font-size: 10px; background: var(--danger); color: #fff; border-radius: 999px; padding: 1px 6px; }
+      .chat-menu { position: fixed; min-width: 140px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 10px 26px rgba(0,0,0,0.3); display: none; z-index: 80; padding: 6px; }
+      .chat-menu.open { display: block; }
+      .chat-menu button { width: 100%; text-align: left; border: 0; background: transparent; color: var(--text); border-radius: 8px; padding: 8px 10px; cursor: pointer; }
+      .chat-menu button:hover { background: var(--surface-2); }
+      .chat-menu button.danger { color: #ff8d8d; }
       .modal { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0, 0, 0, 0.6); }
       .modal.open { display: flex; }
       .modal-card { width: min(440px, 92vw); background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 16px; }
       .field { margin: 10px 0; }
       .field input { width: 100%; border: 1px solid var(--border); border-radius: 10px; padding: 10px; background: var(--bg); color: var(--text); }
       .modal-actions { margin-top: 14px; display: flex; justify-content: flex-end; gap: 8px; }
+      .auth-gate { position: fixed; inset: 0; background: var(--bg); display: none; align-items: center; justify-content: center; z-index: 100; }
+      .auth-gate.open { display: flex; }
+      .auth-card { width: min(460px, 92vw); background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 20px; }
+      .auth-title { margin: 0 0 6px; font-size: 24px; font-weight: 800; }
+      .auth-sub { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+      .auth-error { margin-top: 10px; color: var(--danger); font-size: 12px; min-height: 16px; }
       @media (max-width: 860px) {
         .app { grid-template-columns: 1fr; height: 100dvh; }
         .sidebar { display: none; position: fixed; inset: 0 auto 0 0; width: min(92vw, 340px); z-index: 30; box-shadow: 0 0 0 100vmax rgba(0,0,0,0.45); }
@@ -85,6 +99,19 @@
     </style>
   </head>
   <body>
+    <section class="auth-gate" id="auth-gate">
+      <div class="auth-card">
+        <h1 class="auth-title">Welcome to Hermes</h1>
+        <div class="auth-sub">Create local sign-in once for this browser.</div>
+        <div class="field"><input id="auth-username" placeholder="Username" maxlength="20" /></div>
+        <div class="field"><input id="auth-password" type="password" placeholder="Password" maxlength="64" /></div>
+        <div class="modal-actions">
+          <button class="btn" id="auth-continue">Continue</button>
+        </div>
+        <div class="auth-error" id="auth-error"></div>
+      </div>
+    </section>
+
     <div class="app" id="app-shell">
       <aside class="sidebar">
         <div class="sidebar-header">
@@ -93,9 +120,7 @@
         </div>
         <div class="toolbar">
           <button class="btn" id="sidebar-collapse">Hide</button>
-          <button class="btn" id="btn-create">New</button>
-          <button class="btn" id="btn-rename">Rename</button>
-          <button class="btn btn-danger" id="btn-delete">Delete</button>
+          <button class="btn" id="btn-create" aria-label="Create chat" title="Create chat">+</button>
         </div>
         <div class="chat-list" id="chat-list"></div>
       </aside>
@@ -148,6 +173,10 @@
           <button class="btn" id="chat-modal-confirm">Confirm</button>
         </div>
       </div>
+    </div>
+    <div class="chat-menu" id="chat-menu">
+      <button id="chat-menu-rename">Rename</button>
+      <button class="danger" id="chat-menu-delete">Delete</button>
     </div>
 
     <script src="/firebase-config.js"></script>

@@ -31,10 +31,19 @@ class ReactionType(str, Enum):
 
     @classmethod
     def from_emoji(cls, emoji: str) -> "ReactionType | None":
-        for rt in cls:
-            if rt.value == emoji:
-                return rt
-        return None
+        mapping = {
+            "👍": cls.THUMBS_UP,
+            "👎": cls.THUMBS_DOWN,
+            "❤️": cls.HEART,
+            "😄": cls.LAUGH,
+            "😮": cls.WOW,
+            "😢": cls.SAD,
+            "😠": cls.ANGRY,
+            "🤔": cls.THINKING,
+            "🚀": cls.ROCKET,
+            "👀": cls.EYES,
+        }
+        return mapping.get(emoji)
 
     @classmethod
     def from_alias(cls, alias: str) -> "ReactionType | None":

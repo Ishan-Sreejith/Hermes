@@ -32,11 +32,9 @@ class FirebaseTransport:
     def __init__(self, config: Any, identity: Any):
         self.config = config
         self.identity = identity
-        self.db_url = (
-            getattr(getattr(config, "cloud", None), "database_url", None)
-            or os.getenv("HERMES_FIREBASE_DB_URL")
-            or ""
-        )
+        self.db_url = getattr(
+            getattr(config, "cloud", None), "database_url", None
+        ) or os.getenv("HERMES_FIREBASE_DB_URL")
         self._seen_ids = set()
         self._last_key_by_path: dict[str, str] = {}
         self._active_tasks = {}
@@ -45,6 +43,13 @@ class FirebaseTransport:
         self._seen_count_by_path: dict[str, int] = {}
         self._last_reconcile_ts_by_path: dict[str, float] = {}
         self._last_ts_by_path: dict[str, float] = {}
+        self._user_key = self._normalize_user_key(
+            getattr(identity, "username", "") or "anon"
+        )
+
+    def _normalize_user_key(self, raw: str) -> str:
+        key = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(raw or "").strip().lower())
+        return key[:64] or "anon"
 
     def _to_seconds(self, raw_ts: Any) -> float:
         try:
@@ -122,17 +127,20 @@ class FirebaseTransport:
             if safe_name != "broadcast"
             else "messages/broadcast"
         )
+        self._request(
+            f"user_channels/{self._user_key}/{safe_name}",
+            method="PUT",
+            data={"joined_at": time.time()},
+        )
         return {"ok": True, "path": path}
 
     async def list_rooms(self) -> list[str]:
-        data = self._request("rooms")
+        data = self._request(f"user_channels/{self._user_key}")
         if not isinstance(data, dict):
             return []
-        names = []
+        names = ["@broadcast"]
         for key in sorted(data.keys()):
-            if key == "broadcast":
-                names.append("@broadcast")
-            else:
+            if key and key != "broadcast":
                 names.append(f"@{key}")
         return names
 
@@ -140,8 +148,7 @@ class FirebaseTransport:
         safe_name = str(room_name or "").replace("@", "").strip().lower()
         if not safe_name or safe_name == "broadcast":
             return False
-        self._request(f"rooms/{safe_name}", method="DELETE")
-        self._request(f"messages/chan_{safe_name}", method="DELETE")
+        self._request(f"user_channels/{self._user_key}/{safe_name}", method="DELETE")
         return True
 
     async def rename_room(self, old_name: str, new_name: str) -> bool:
@@ -157,16 +164,19 @@ class FirebaseTransport:
         if old_safe == new_safe:
             return True
 
-        old_room = self._request(f"rooms/{old_safe}")
-        if old_room is None:
-            return False
-
-        old_messages = self._request(f"messages/chan_{old_safe}")
-        self._request(f"rooms/{new_safe}", method="PUT", data=old_room)
-        if isinstance(old_messages, dict):
-            self._request(f"messages/chan_{new_safe}", method="PUT", data=old_messages)
-        self._request(f"rooms/{old_safe}", method="DELETE")
-        self._request(f"messages/chan_{old_safe}", method="DELETE")
+        room = self._request(f"rooms/{new_safe}")
+        if room is None:
+            self._request(
+                f"rooms/{new_safe}",
+                method="PUT",
+                data={"created_at": time.time()},
+            )
+        self._request(
+            f"user_channels/{self._user_key}/{new_safe}",
+            method="PUT",
+            data={"joined_at": time.time()},
+        )
+        self._request(f"user_channels/{self._user_key}/{old_safe}", method="DELETE")
         return True
 
     def _mark_seen(self, path: str, key: str):
@@ -729,12 +739,29 @@ class TransportManager:
 
     def resolve_direct_target(self, target: str) -> str:
         raw = str(target or "").strip()
+        if raw.startswith("#"):
+            raw = raw[1:].strip()
         if not raw or raw.startswith("@") or raw == "*":
             return raw
         if self.fb.get_peer_presence(raw):
             return raw
         resolved = self.fb.resolve_username(raw)
         return resolved or raw
+
+    def _validate_channel_name(self, name: str) -> str | None:
+        raw = str(name or "").strip()
+        if not raw:
+            return None
+        if not raw.startswith("@"):
+            raw = "@" + raw
+        safe = raw.lower()
+        if safe == "@broadcast":
+            return safe
+        if len(safe) > 32:
+            return None
+        if not re.match(r"^@[a-z0-9_-]+$", safe):
+            return None
+        return safe
 
     async def initialize(self, listen_port: int | None = None) -> bool:
         self.status["direct_port"] = await self.direct_peer.listen_tcp(listen_port or 0)
@@ -778,7 +805,10 @@ class TransportManager:
         return await self.fb.authenticate(u, p)
 
     async def join_channel(self, name, password=None) -> dict:
-        res = await self.fb.join_room(name, password)
+        safe = self._validate_channel_name(name)
+        if not safe:
+            return {"ok": False, "error": "invalid channel name"}
+        res = await self.fb.join_room(safe, password)
         if res.get("ok"):
             self.fb.listen(res["path"], self._on_message)
         return res
@@ -787,15 +817,27 @@ class TransportManager:
         return await self.join_channel(name, password)
 
     async def delete_channel(self, name: str) -> dict:
-        ok = await self.fb.delete_room(name)
-        return {"ok": bool(ok), "channel": name}
+        safe = self._validate_channel_name(name)
+        if not safe:
+            return {"ok": False, "channel": name, "error": "invalid channel name"}
+        ok = await self.fb.delete_room(safe)
+        return {"ok": bool(ok), "channel": safe}
 
     async def list_channels(self) -> list[str]:
         return await self.fb.list_rooms()
 
     async def rename_channel(self, old_name: str, new_name: str) -> dict:
-        ok = await self.fb.rename_room(old_name, new_name)
-        return {"ok": bool(ok), "old": old_name, "new": new_name}
+        old_safe = self._validate_channel_name(old_name)
+        new_safe = self._validate_channel_name(new_name)
+        if not old_safe or not new_safe:
+            return {
+                "ok": False,
+                "old": old_name,
+                "new": new_name,
+                "error": "invalid channel name",
+            }
+        ok = await self.fb.rename_room(old_safe, new_safe)
+        return {"ok": bool(ok), "old": old_safe, "new": new_safe}
 
     async def start_personal_inbox_listener(self):
         if not getattr(self.identity, "peer_id", None):
@@ -827,6 +869,9 @@ class TransportManager:
         raw = str(target or "")
         if raw in {"*", "broadcast", "@broadcast"}:
             return "messages/broadcast"
+        if raw.startswith("#"):
+            raw = self.resolve_direct_target(raw)
+            return f"messages/{raw}"
         if raw.startswith("@"):
             raw = "@" + raw[1:].lower()
         safe_target = raw.replace("@", "chan_").replace("*", "broadcast")
@@ -850,6 +895,7 @@ class TransportManager:
                     "udp_port": item.get("udp_port"),
                     "stun_ip": item.get("stun_ip"),
                     "stun_port": item.get("stun_port"),
+                    "latency_ms": None,
                 }
             )
         return peers
@@ -926,6 +972,10 @@ class TransportManager:
         return int(bound)
 
     async def create_random_listen_port(self) -> int:
+        for _ in range(10):
+            bound = await self.set_listen_port(0)
+            if bound:
+                return int(bound)
         return await self.set_listen_port(0)
 
     async def ping_peer(self, peer_id: str) -> dict:

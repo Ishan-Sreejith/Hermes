@@ -46,6 +46,26 @@ class HermesTUI(App):
     #chat-list { background: transparent; border: none; }
     """
 
+    CSS_HIGH_CONTRAST = """
+    Screen { background: #000000; color: #ffffff; }
+    #left { background: #000000; border-right: solid #ffffff; }
+    .panel-title { color: #ffffff; text-style: bold; }
+    #messages { background: #000000; border: round #ffffff; }
+    #status { color: #ffffff; border-bottom: solid #ffffff; }
+    #composer { background: #000000; }
+    Input { border: tall #ffffff; background: #000000; color: #ffffff; }
+    Input:focus { border: tall #ffffff; }
+    ListItem.--highlight { background: #ffffff; color: #000000; text-style: bold; }
+    """
+
+    def on_unmount(self):
+        try:
+            if self.transport:
+                if getattr(self.transport, "direct_peer", None):
+                    asyncio.create_task(self.transport.direct_peer.close_udp())
+        except Exception:
+            pass
+
     BINDINGS = [
         ("ctrl+c", "quit", "Quit"),
         ("ctrl+l", "focus_input", "Focus Input"),
@@ -55,6 +75,7 @@ class HermesTUI(App):
         ("ctrl+n", "new_channel", "New Channel"),
         ("ctrl+r", "rename_channel", "Rename Channel"),
         ("ctrl+d", "delete_channel", "Delete Channel"),
+        ("ctrl+t", "toggle_contrast", "Toggle Contrast"),
     ]
 
     active_target = reactive("@broadcast")
@@ -62,6 +83,7 @@ class HermesTUI(App):
     def __init__(self, home: Path | None = None, listen_port: int | None = None):
         super().__init__()
         self.home = home or (Path.home() / ".p2pchat")
+        self.listen_port = listen_port
         self.identity = load_or_create(self.home)
         self.config_mgr = ConfigManager(self.home)
         self.config = self.config_mgr.load()
@@ -75,6 +97,7 @@ class HermesTUI(App):
 
         self._known_peers = {}
         self._known_channels = ["@broadcast"]
+        self._last_input_ts = 0.0
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -92,7 +115,9 @@ class HermesTUI(App):
     async def on_mount(self):
         self._rebuild_list()
         self.query_one("#input").focus()
-        await self.transport.initialize()
+        if getattr(self.config.ui, "high_contrast", False):
+            self.stylesheet.add_source(self.CSS_HIGH_CONTRAST)
+        await self.transport.initialize(listen_port=getattr(self, "listen_port", None))
         try:
             chans = await self.transport.list_channels()
             for c in chans:
@@ -103,6 +128,8 @@ class HermesTUI(App):
         except Exception:
             pass
         self.set_interval(1.0, self._update_status_line)
+        if self.config.ui.last_channel and self.config.ui.last_channel != "@broadcast":
+            await self._switch_target(self.config.ui.last_channel)
 
     def _update_status_line(self):
         s = self.transport.status
@@ -113,11 +140,28 @@ class HermesTUI(App):
     def action_toggle_sidebar(self):
         self.query_one("#left").toggle_class("hidden")
 
+    def action_toggle_contrast(self):
+        self.config.ui.high_contrast = not getattr(
+            self.config.ui, "high_contrast", False
+        )
+        try:
+            self.config_mgr.save(self.config)
+        except Exception:
+            pass
+        if self.config.ui.high_contrast:
+            self.stylesheet.add_source(self.CSS_HIGH_CONTRAST)
+        else:
+            self.stylesheet.reset()
+            self.stylesheet.add_source(self.CSS)
+
     async def action_prev_chat(self):
         await self._cycle_chat(-1)
 
     async def action_next_chat(self):
         await self._cycle_chat(1)
+
+    def action_focus_input(self):
+        self.query_one("#input").focus()
 
     async def _cycle_chat(self, delta: int):
         all_chats = self._known_channels + list(self._known_peers.keys())
@@ -133,6 +177,12 @@ class HermesTUI(App):
         msgs = self.engine.storage.get_messages(target)
         for m in msgs:
             self.push_message(m)
+        if self.config.ui.last_channel != target:
+            self.config.ui.last_channel = target
+            try:
+                self.config_mgr.save(self.config)
+            except Exception:
+                pass
         self._rebuild_list()
 
     async def action_new_channel(self):
@@ -216,7 +266,10 @@ class HermesTUI(App):
             lv.append(ListItem(Label(f" {dot} {p.name}"), id=f"l-{p_id}"))
 
     def push_message(self, msg: dict):
-        log = self.query_one("#messages", RichLog)
+        try:
+            log = self.query_one("#messages", RichLog)
+        except Exception:
+            return
         is_me = msg.get("from_id") == self.identity.peer_id
         color = "3b82f6" if is_me else "94a3b8"
         name = "You" if is_me else msg.get("from_name", "unknown")
@@ -229,11 +282,18 @@ class HermesTUI(App):
         event.input.value = ""
         if not txt:
             return
+        now = time.time()
+        if now - self._last_input_ts < 0.2:
+            return
+        self._last_input_ts = now
 
         if txt.startswith("/create "):
             name = txt.split(maxsplit=1)[1].strip()
             if not name.startswith("@"):
                 name = "@" + name
+            if self.active_target == name:
+                self.push_message({"body": f"Already in {name}", "from_name": "SYS"})
+                return
             res = await self.transport.create_channel(name)
             if res.get("ok"):
                 if name not in self._known_channels:
@@ -258,6 +318,14 @@ class HermesTUI(App):
                     old_name = "@" + old_name
                 if not new_name.startswith("@"):
                     new_name = "@" + new_name
+                if old_name == new_name:
+                    self.push_message(
+                        {
+                            "body": "Rename skipped: channel names match.",
+                            "from_name": "SYS",
+                        }
+                    )
+                    return
                 res = await self.transport.rename_channel(old_name, new_name)
                 if res.get("ok"):
                     if old_name in self._known_channels:
@@ -274,8 +342,9 @@ class HermesTUI(App):
                         }
                     )
                 else:
+                    err = res.get("error") or "invalid channel name"
                     self.push_message(
-                        {"body": f"Rename failed: {old_name}", "from_name": "SYS"}
+                        {"body": f"Rename failed: {err}", "from_name": "SYS"}
                     )
             else:
                 self.push_message(
@@ -290,6 +359,14 @@ class HermesTUI(App):
             if name == "@broadcast":
                 self.push_message(
                     {"body": "Cannot delete @broadcast", "from_name": "SYS"}
+                )
+                return
+            if "--yes" not in txt and " -y" not in txt:
+                self.push_message(
+                    {
+                        "body": f"Confirm delete {name}: /delete {name} --yes",
+                        "from_name": "SYS",
+                    }
                 )
                 return
             res = await self.transport.delete_channel(name)
@@ -309,8 +386,18 @@ class HermesTUI(App):
 
         if txt.startswith("/join "):
             name = txt.split(maxsplit=1)[1].strip()
+            if name.startswith("#"):
+                target = self.transport.resolve_direct_target(name)
+                await self._switch_target(target)
+                self.push_message(
+                    {"body": f"Direct chat target set to {target}", "from_name": "SYS"}
+                )
+                return
             if not name.startswith("@"):
                 name = "@" + name
+            if self.active_target == name:
+                self.push_message({"body": f"Already in {name}", "from_name": "SYS"})
+                return
             await self.transport.join_channel(name)
             if name not in self._known_channels:
                 self._known_channels.append(name)
@@ -340,6 +427,29 @@ class HermesTUI(App):
             for r in results:
                 self.push_message(r)
             return
+
+        if txt == "/outbox":
+            pending = self.engine.storage.list_outbox(limit=10)
+            if not pending:
+                self.push_message({"body": "Outbox empty.", "from_name": "SYS"})
+            else:
+                self.push_message(
+                    {"body": f"Outbox pending: {len(pending)}", "from_name": "SYS"}
+                )
+                for m in pending:
+                    target = m.get("to") or m.get("channel")
+                    body = m.get("body") or ""
+                    self.push_message(
+                        {"body": f"- {target} {body}", "from_name": "SYS"}
+                    )
+            return
+
+        if txt.startswith("/me "):
+            action = txt[4:].strip()
+            if not action:
+                self.push_message({"body": "Usage: /me <action>", "from_name": "SYS"})
+                return
+            txt = f"* {self.identity.username} {action}"
 
         if self.active_target.startswith("@"):
             await self.engine.send_channel(self.active_target, txt)

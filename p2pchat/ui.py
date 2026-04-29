@@ -3,10 +3,13 @@ import threading
 import time
 import uuid
 import asyncio
+from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Any
 import logging
+
+from .config import ConfigManager
 
 VERSION = "0.3.0"
 
@@ -23,6 +26,7 @@ class ChatUI:
         self.identity = identity
         self.engine = engine
         self.config = config
+        self.config_mgr = ConfigManager(Path.home() / ".p2pchat")
         self.messages = []
         self.peers = []
         self.input_buf = ""
@@ -40,6 +44,9 @@ class ChatUI:
         self._sync_check_interval = 2.0
         self._last_sync_check = 0.0
         self._sync_gap = 0
+        self._menu_hint_shown = False
+        if getattr(self.config.ui, "last_channel", None):
+            self.active_channel = self.config.ui.last_channel
 
     def _resolve_direct_target(self, target: str) -> str:
         raw = str(target or "").strip()
@@ -68,6 +75,32 @@ class ChatUI:
         return ts
 
     def init_colors(self):
+        if getattr(self.config.ui, "high_contrast", False):
+            try:
+                curses.use_default_colors()
+            except curses.error:
+                pass
+            curses.start_color()
+            try:
+                curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLACK)
+                curses.init_pair(2, curses.COLOR_WHITE, curses.COLOR_BLACK)
+                curses.init_pair(3, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+                curses.init_pair(4, curses.COLOR_WHITE, curses.COLOR_BLACK)
+                curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_BLACK)
+                curses.init_pair(6, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+                curses.init_pair(7, curses.COLOR_RED, curses.COLOR_BLACK)
+                curses.init_pair(8, curses.COLOR_CYAN, curses.COLOR_BLACK)
+                curses.init_pair(9, curses.COLOR_CYAN, curses.COLOR_BLACK)
+                curses.init_pair(10, curses.COLOR_WHITE, curses.COLOR_BLACK)
+                curses.init_pair(11, curses.COLOR_WHITE, curses.COLOR_BLACK)
+                curses.init_pair(12, curses.COLOR_WHITE, curses.COLOR_BLACK)
+                curses.init_pair(13, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+                curses.init_pair(14, curses.COLOR_WHITE, curses.COLOR_BLACK)
+                curses.init_pair(15, curses.COLOR_MAGENTA, curses.COLOR_BLACK)
+            except curses.error:
+                pass
+            return
+
         use_default = False
         try:
             curses.use_default_colors()
@@ -160,6 +193,8 @@ class ChatUI:
             "  /peers | /ping <peer|ip:port> | /resolve <host> | /scan <host> | /lan"
         )
         self._system("  /status | /load [n|on|off] | /clear (or /cls) | /quit (or /q)")
+        self._system("  /me <action> | /theme (toggle high contrast)")
+        self._system("  /outbox (show queued sends)")
 
     def handle_command(self, text: str):
         """Handle user commands with proper error handling."""
@@ -191,6 +226,62 @@ class ChatUI:
 
             if cmd == "/quit":
                 self._running = False
+                return
+
+            if cmd == "/theme":
+                self.config.ui.high_contrast = not getattr(
+                    self.config.ui, "high_contrast", False
+                )
+                try:
+                    self.config_mgr.save(self.config)
+                except Exception:
+                    pass
+                self.init_colors()
+                self._system(
+                    "High contrast enabled."
+                    if self.config.ui.high_contrast
+                    else "High contrast disabled."
+                )
+                return
+
+            if cmd == "/me" and len(parts) > 1:
+                action = " ".join(parts[1:]).strip()
+                if not action:
+                    self._system("Usage: /me <action>")
+                    return
+                msg_id = str(uuid.uuid4())
+                msg = {
+                    "id": msg_id,
+                    "from_id": self.identity.peer_id,
+                    "from_name": self.identity.username,
+                    "body": f"* {self.identity.username} {action}",
+                    "ts": time.time(),
+                    "state": "sending",
+                    "channel": self.active_channel
+                    if self.active_channel.startswith("@")
+                    else None,
+                    "to": None
+                    if self.active_channel.startswith("@")
+                    else self.active_channel,
+                    "enc": "none",
+                    "_seq": 2_000_000_000,
+                }
+                self.push_message(msg)
+                if self.engine and self.engine.loop:
+                    if self.active_channel.startswith("@"):
+                        asyncio.run_coroutine_threadsafe(
+                            self.engine.send_channel(
+                                self.active_channel, msg["body"], msg_id=msg_id
+                            ),
+                            self.engine.loop,
+                        )
+                    else:
+                        asyncio.run_coroutine_threadsafe(
+                            self.engine.send_direct(
+                                self.active_channel, msg["body"], msg_id=msg_id
+                            ),
+                            self.engine.loop,
+                        )
                 return
 
             if cmd == "/load":
@@ -227,10 +318,30 @@ class ChatUI:
                 return
 
             if cmd == "/join" and len(parts) > 1:
-                chan = parts[1]
+                chan = parts[1].strip()
+                if chan.startswith("#"):
+                    target = self._resolve_direct_target(chan)
+                    self.active_channel = target
+                    if getattr(self.config.ui, "last_channel", None) != target:
+                        self.config.ui.last_channel = target
+                        try:
+                            self.config_mgr.save(self.config)
+                        except Exception:
+                            pass
+                    self._system(f"Direct chat target set to {target}")
+                    return
                 if not chan.startswith("@"):
                     chan = "@" + chan
+                if self.active_channel == chan:
+                    self._system(f"Already in {chan}")
+                    return
                 self.active_channel = chan
+                if getattr(self.config.ui, "last_channel", None) != chan:
+                    self.config.ui.last_channel = chan
+                    try:
+                        self.config_mgr.save(self.config)
+                    except Exception:
+                        pass
                 with self._lock:
                     self.messages = []
                 if self.engine and self.engine.loop:
@@ -250,8 +361,17 @@ class ChatUI:
                 requested = parts[1].strip()
                 target = self._resolve_direct_target(requested)
                 self.active_channel = target
+                if getattr(self.config.ui, "last_channel", None) != target:
+                    self.config.ui.last_channel = target
+                    try:
+                        self.config_mgr.save(self.config)
+                    except Exception:
+                        pass
                 if len(parts) > 2:
                     text_to_send = " ".join(parts[2:]).strip()
+                    if not text_to_send:
+                        self._system("Empty message skipped.")
+                        return
                     msg_id = str(uuid.uuid4())
                     self.push_message(
                         {
@@ -306,6 +426,9 @@ class ChatUI:
                 chan = parts[1].strip()
                 if not chan.startswith("@"):
                     chan = "@" + chan
+                if self.active_channel == chan:
+                    self._system(f"Already in {chan}")
+                    return
                 password = parts[2].strip() if len(parts) > 2 else None
                 if self.engine and self.engine.loop:
                     fut = asyncio.run_coroutine_threadsafe(
@@ -334,6 +457,10 @@ class ChatUI:
                     chan = "@" + chan
                 if chan == "@broadcast":
                     self._system("@broadcast cannot be deleted.")
+                    return
+                confirm = " ".join(parts[2:]).strip().lower()
+                if confirm not in {"--yes", "-y", "yes"}:
+                    self._system(f"Confirm delete {chan}: /delete {chan} --yes")
                     return
                 if self.engine and self.engine.loop:
                     fut = asyncio.run_coroutine_threadsafe(
@@ -367,6 +494,9 @@ class ChatUI:
                 if old_chan == "@broadcast" or new_chan == "@broadcast":
                     self._system("@broadcast cannot be renamed.")
                     return
+                if old_chan == new_chan:
+                    self._system("Rename skipped: channel names match.")
+                    return
                 if self.engine and self.engine.loop:
                     fut = asyncio.run_coroutine_threadsafe(
                         self.engine.transport.rename_channel(old_chan, new_chan),
@@ -380,9 +510,20 @@ class ChatUI:
                                 self._system(f"Renamed {old_chan} -> {new_chan}")
                                 if self.active_channel == old_chan:
                                     self.active_channel = new_chan
+                                    if (
+                                        getattr(self.config.ui, "last_channel", None)
+                                        == old_chan
+                                    ):
+                                        self.config.ui.last_channel = new_chan
+                                        try:
+                                            self.config_mgr.save(self.config)
+                                        except Exception:
+                                            pass
                                     self._system(f"Switched to {new_chan}")
                             else:
-                                self._system(f"Rename failed: {old_chan} -> {new_chan}")
+                                self._system(
+                                    f"Rename failed: {res.get('error', 'invalid channel name')}"
+                                )
                         except Exception as e:
                             self._system(f"Rename error: {e}")
 
@@ -405,7 +546,9 @@ class ChatUI:
                     self._system("No peers online.")
                 else:
                     for p in peers:
-                        body = f"{p.get('name')} ({p.get('id')}) {p.get('ip')}:{p.get('port')} udp:{p.get('udp_port')}"
+                        lat = p.get("latency_ms")
+                        lat_tag = f" {lat}ms" if isinstance(lat, int) else ""
+                        body = f"{p.get('name')} ({p.get('id')}) {p.get('ip')}:{p.get('port')} udp:{p.get('udp_port')}{lat_tag}"
                         self._system(body)
                 return
 
@@ -590,6 +733,22 @@ class ChatUI:
                 )
                 return
 
+            if cmd == "/outbox":
+                pending = []
+                try:
+                    pending = self.engine.storage.list_outbox(limit=10)
+                except Exception:
+                    pending = []
+                if not pending:
+                    self._system("Outbox empty.")
+                else:
+                    self._system(f"Outbox pending: {len(pending)}")
+                    for m in pending:
+                        self._system(
+                            f"- {m.get('to') or m.get('channel')} {m.get('body')}"
+                        )
+                return
+
             if cmd == "/direct" and len(parts) > 2:
                 target = parts[1]
                 text_to_send = " ".join(parts[2:])
@@ -640,7 +799,8 @@ class ChatUI:
             self.input_buf = ""
             self.input_cursor = 0
         elif key in (10, 13):
-            text = self.input_buf.strip()
+            raw_text = self.input_buf
+            text = raw_text.strip()
             if text:
                 if text.startswith("/"):
                     self.handle_command(text)
@@ -672,6 +832,15 @@ class ChatUI:
                             target = self._resolve_direct_target(self.active_channel)
                             if target != self.active_channel:
                                 self.active_channel = target
+                                if (
+                                    getattr(self.config.ui, "last_channel", None)
+                                    != target
+                                ):
+                                    self.config.ui.last_channel = target
+                                    try:
+                                        self.config_mgr.save(self.config)
+                                    except Exception:
+                                        pass
                                 self.push_message(
                                     {
                                         "type": "system",
@@ -724,6 +893,9 @@ class ChatUI:
 
         header_left = f"╔══ Hermes v{VERSION} ══ {self.active_channel}"
         header_right = f"online:{online_count} ══╗"
+        if len(header_left) + len(header_right) + 4 > W:
+            trim_len = max(0, W - len(header_right) - 8)
+            header_left = f"╔══ Hermes v{VERSION} ══ " + self.active_channel[:trim_len]
         header_full = f"{header_left}{' ' * max(0, W - len(header_left) - len(header_right) - 4)}{header_right}"
         try:
             stdscr.addstr(
@@ -800,9 +972,9 @@ class ChatUI:
                         prev_date = msg_date
                     line_items.append(("msg", msg))
 
-                end_idx = len(line_items) - self.scroll_offset
+                end_idx = max(0, len(line_items) - self.scroll_offset)
                 start_idx = max(0, end_idx - msg_rows)
-                visible = line_items[start_idx:end_idx] if end_idx > 0 else []
+                visible = line_items[start_idx:end_idx] if end_idx > start_idx else []
 
                 for kind, payload in visible:
                     if curr_row > H - 3:
@@ -831,7 +1003,11 @@ class ChatUI:
                     )
 
                     if msg.get("type") == "system":
-                        sys_text = f"  ⚡ {msg.get('body', '')}"
+                        sys_text = (
+                            f"  ! {msg.get('body', '')}"
+                            if getattr(self.config.ui, "high_contrast", False)
+                            else f"  ⚡ {msg.get('body', '')}"
+                        )
                         try:
                             stdscr.addstr(
                                 curr_row,
@@ -845,19 +1021,35 @@ class ChatUI:
                         is_me = msg.get("from_id") == self.identity.peer_id
                         color = curses.color_pair(5) if is_me else curses.color_pair(4)
                         sender = str(msg.get("from_name", "unknown"))[:10]
-                        prefix_char = "▸" if is_me else "▹"
+                        prefix_char = (
+                            ">"
+                            if getattr(self.config.ui, "high_contrast", False)
+                            else ("▸" if is_me else "▹")
+                        )
                         state = msg.get("state", "sent")
 
                         state_icon = ""
                         state_attr = curses.color_pair(2)
                         if state == "sending":
-                            state_icon = " ⏳"
+                            state_icon = (
+                                " ..."
+                                if getattr(self.config.ui, "high_contrast", False)
+                                else " ⏳"
+                            )
                             state_attr = curses.color_pair(6)
                         elif state == "sent":
-                            state_icon = " ✓"
+                            state_icon = (
+                                " ok"
+                                if getattr(self.config.ui, "high_contrast", False)
+                                else " ✓"
+                            )
                             state_attr = curses.color_pair(14)
                         elif state == "failed":
-                            state_icon = " ✗"
+                            state_icon = (
+                                " !!"
+                                if getattr(self.config.ui, "high_contrast", False)
+                                else " ✗"
+                            )
                             state_attr = curses.color_pair(7)
 
                         try:
@@ -1033,3 +1225,7 @@ class ChatUI:
         finally:
             self._running = False
             self.stdscr = None
+            try:
+                curses.endwin()
+            except curses.error:
+                pass

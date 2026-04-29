@@ -4,7 +4,6 @@ import json
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any
 
 
 class Storage:
@@ -48,22 +47,31 @@ class Storage:
                     file_name TEXT,
                     file_path TEXT,
                     size INTEGER,
-                    bytes_done INTEGER,
                     direction TEXT,
                     peer_id TEXT,
                     status TEXT,
                     ts REAL
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS outbox (
+                    id TEXT PRIMARY KEY,
+                    ts REAL,
+                    target TEXT,
+                    body TEXT,
+                    enc TEXT,
+                    tries INTEGER,
+                    last_error TEXT,
+                    raw_json TEXT
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_outbox_ts ON outbox(ts)")
 
     def save_message(self, msg: dict):
+        target = msg.get("channel") or msg.get("to") or "@broadcast"
         with sqlite3.connect(self.db_path) as conn:
-            target = msg.get("channel") or msg.get("to") or "@broadcast"
             conn.execute(
-                """
-                INSERT OR REPLACE INTO messages (id, ts, from_id, from_name, target, body, type, enc, state, raw_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
+                "INSERT OR REPLACE INTO messages (id, ts, from_id, from_name, target, body, type, enc, state, raw_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (
                     msg.get("id"),
                     msg.get("ts", time.time()),
@@ -99,10 +107,7 @@ class Storage:
     def save_peer(self, peer: dict):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
-                """
-                INSERT OR REPLACE INTO peers (peer_id, username, last_seen, online, status_text, presence_json)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """,
+                "INSERT OR REPLACE INTO peers (peer_id, username, last_seen, online, status_text, presence_json) VALUES (?,?,?,?,?,?)",
                 (
                     peer.get("id"),
                     peer.get("name"),
@@ -124,3 +129,64 @@ class Storage:
     def update_message_state(self, msg_id: str, state: str):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("UPDATE messages SET state = ? WHERE id = ?", (state, msg_id))
+
+    def enqueue_outbox(self, msg: dict, last_error: str | None = None):
+        target = msg.get("channel") or msg.get("to") or "@broadcast"
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO outbox (id, ts, target, body, enc, tries, last_error, raw_json) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    msg.get("id"),
+                    msg.get("ts", time.time()),
+                    target,
+                    msg.get("body"),
+                    msg.get("enc", "none"),
+                    int(msg.get("tries", 0)),
+                    last_error,
+                    json.dumps(msg),
+                ),
+            )
+
+    def list_outbox(self, limit: int = 50) -> list[dict]:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT raw_json, tries, last_error FROM outbox ORDER BY ts ASC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            items = []
+            for row in rows:
+                payload = json.loads(row["raw_json"])
+                payload["tries"] = row["tries"]
+                if row["last_error"]:
+                    payload["last_error"] = row["last_error"]
+                items.append(payload)
+            return items
+
+    def update_outbox_attempt(
+        self, msg_id: str, tries: int, last_error: str | None = None
+    ):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE outbox SET tries = ?, last_error = ? WHERE id = ?",
+                (int(tries), last_error, msg_id),
+            )
+
+    def remove_outbox(self, msg_id: str):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM outbox WHERE id = ?", (msg_id,))
+
+    def create_file_transfer(
+        self,
+        tid: str,
+        fname: str,
+        fpath: str,
+        fsize: int = 0,
+        fdir: str = "send",
+        fpeer: str = "",
+    ):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO file_transfers (id, file_name, file_path, size, direction, peer_id, status, ts) VALUES (?,?,?,?,?,?,?,?)",
+                (tid, fname, fpath, fsize, fdir, fpeer, "pending", time.time()),
+            )

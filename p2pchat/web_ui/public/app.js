@@ -24,7 +24,16 @@ const state = {
   bootstrapped: false,
   connected: false,
   unread: {},
+  directTargets: (() => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem('hermesDirectTargets') || '[]');
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  })(),
 };
+const AUTH_CACHE_KEY = 'hermesAuthV1';
 
 const el = {
   statusText: document.getElementById('connection-text'),
@@ -34,8 +43,6 @@ const el = {
   chatTitle: document.getElementById('chat-title'),
   chatList: document.getElementById('chat-list'),
   btnCreate: document.getElementById('btn-create'),
-  btnRename: document.getElementById('btn-rename'),
-  btnDelete: document.getElementById('btn-delete'),
   btnTheme: document.getElementById('btn-theme'),
   btnSettings: document.getElementById('btn-settings'),
   settingsOverlay: document.getElementById('settings-overlay'),
@@ -56,6 +63,14 @@ const el = {
   sidebarCollapse: document.getElementById('sidebar-collapse'),
   sidebar: document.querySelector('.sidebar'),
   appShell: document.getElementById('app-shell'),
+  authGate: document.getElementById('auth-gate'),
+  authUsername: document.getElementById('auth-username'),
+  authPassword: document.getElementById('auth-password'),
+  authContinue: document.getElementById('auth-continue'),
+  authError: document.getElementById('auth-error'),
+  chatMenu: document.getElementById('chat-menu'),
+  chatMenuRename: document.getElementById('chat-menu-rename'),
+  chatMenuDelete: document.getElementById('chat-menu-delete'),
 };
 
 let modalMode = 'create';
@@ -63,6 +78,7 @@ let settingsMode = 'welcome';
 const uiPrefs = {
   sidebarCollapsed: localStorage.getItem('hermesSidebarCollapsed') === '1',
 };
+let contextChannel = '';
 
 function escapeHtml(value) {
   const div = document.createElement('div');
@@ -73,13 +89,41 @@ function escapeHtml(value) {
 function normalizeChannel(name) {
   const raw = String(name || '').trim();
   if (!raw) return '';
+  if (raw.startsWith('#')) {
+    return `#${raw.slice(1).trim()}`;
+  }
   return raw.startsWith('@') ? raw.toLowerCase() : `@${raw.toLowerCase()}`;
 }
 
 function channelPath(channel) {
   const c = normalizeChannel(channel);
   if (c === '@broadcast') return 'messages/broadcast';
+  if (c.startsWith('#')) return `messages/${c.slice(1)}`;
   return `messages/chan_${c.slice(1)}`;
+}
+
+async function resolveDirectTarget(raw) {
+  const token = String(raw || '').trim().replace(/^#+/, '');
+  if (!token) return '';
+  if (token.startsWith('user_') || /^[0-9a-f-]{16,}$/i.test(token)) {
+    return token;
+  }
+  try {
+    const primary = await get(ref(state.db, `users/${token}`));
+    let val = primary.val() || {};
+    if (!val.peer_id && !val.peerId) {
+      const lower = await get(ref(state.db, `users/${token.toLowerCase()}`));
+      val = lower.val() || {};
+    }
+    const peer = val.peer_id || val.peerId || '';
+    return String(peer || token);
+  } catch {
+    return token;
+  }
+}
+
+function persistDirectTargets() {
+  localStorage.setItem('hermesDirectTargets', JSON.stringify(state.directTargets.slice(0, 40)));
 }
 
 function setBanner(message) {
@@ -91,6 +135,59 @@ function setBanner(message) {
   }
   el.errorBanner.textContent = message;
   el.errorBanner.classList.add('open');
+}
+
+function readAuthCache() {
+  try {
+    return JSON.parse(localStorage.getItem(AUTH_CACHE_KEY) || 'null');
+  } catch {
+    return null;
+  }
+}
+
+async function hashPassword(raw) {
+  const bytes = new TextEncoder().encode(String(raw || ''));
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+async function completeAuthGate() {
+  const name = String(el.authUsername?.value || '').trim();
+  const password = String(el.authPassword?.value || '');
+  if (!name) {
+    el.authError.textContent = 'Username is required.';
+    return;
+  }
+  if (password.length < 4) {
+    el.authError.textContent = 'Password must be at least 4 characters.';
+    return;
+  }
+  const passHash = await hashPassword(password);
+  localStorage.setItem(
+    AUTH_CACHE_KEY,
+    JSON.stringify({ username: name, passHash, createdAt: Date.now() }),
+  );
+  state.username = name;
+  localStorage.setItem('hermesUsername', state.username);
+  el.authGate.classList.remove('open');
+  bootstrap();
+}
+
+function initAuthGate() {
+  const cached = readAuthCache();
+  if (cached && cached.username && cached.passHash) {
+    state.username = cached.username;
+    localStorage.setItem('hermesUsername', state.username);
+    el.authGate.classList.remove('open');
+    bootstrap();
+    return;
+  }
+  el.authGate.classList.add('open');
+  if (el.authUsername) el.authUsername.value = state.username || '';
+  el.authError.textContent = '';
+  el.authUsername?.focus();
 }
 
 function updateConnectionUi() {
@@ -196,12 +293,44 @@ function updateChatList(channels) {
     const last = (state.chatCache[channel] || []).slice(-1)[0];
     const card = document.createElement('div');
     card.className = `chat-card ${channel === state.activeTarget ? 'active' : ''}`;
+    card.dataset.channel = channel;
     const unreadCount = Number(state.unread[channel] || 0);
     const unreadBadge = unreadCount > 0 ? `<span class="badge">${unreadCount}</span>` : '';
-    card.innerHTML = `<div><strong>${escapeHtml(channel)}</strong>${unreadBadge}</div><div class="meta">${escapeHtml(last ? String(last.body || '').slice(0, 60) : 'No messages yet')}</div>`;
-    card.addEventListener('click', () => switchTarget(channel));
+    const showMenu = channel !== '@broadcast';
+    card.innerHTML = `<div class="chat-card-row"><div><strong>${escapeHtml(channel)}</strong>${unreadBadge}</div>${showMenu ? `<button class="chat-menu-trigger" data-channel="${escapeHtml(channel)}" aria-label="Channel options" title="Channel options">&#8942;</button>` : ''}</div><div class="meta">${escapeHtml(last ? String(last.body || '').slice(0, 60) : 'No messages yet')}</div>`;
+    card.addEventListener('click', () => {
+      closeChatMenu();
+      switchTarget(channel);
+    });
+    const trigger = card.querySelector('.chat-menu-trigger');
+    if (trigger) {
+      trigger.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openChatMenu(channel, event.clientX, event.clientY);
+      });
+    }
     el.chatList.appendChild(card);
   });
+}
+
+function openChatMenu(channel, x, y) {
+  if (!el.chatMenu) return;
+  if (normalizeChannel(channel) === '@broadcast') return;
+  contextChannel = normalizeChannel(channel);
+  el.chatMenu.classList.add('open');
+  const menuWidth = 160;
+  const menuHeight = 90;
+  const left = Math.max(8, Math.min(x, window.innerWidth - menuWidth - 8));
+  const top = Math.max(8, Math.min(y, window.innerHeight - menuHeight - 8));
+  el.chatMenu.style.left = `${left}px`;
+  el.chatMenu.style.top = `${top}px`;
+}
+
+function closeChatMenu() {
+  if (!el.chatMenu) return;
+  el.chatMenu.classList.remove('open');
+  contextChannel = '';
 }
 
 function ensureChannelListener(channel) {
@@ -249,6 +378,12 @@ async function refreshRooms() {
       channels.push(c);
       ensureChannelListener(c);
     });
+  for (const d of state.directTargets) {
+    if (d && !channels.includes(d)) {
+      channels.push(d);
+      ensureChannelListener(d);
+    }
+  }
   if (!channels.includes(state.activeTarget)) {
     state.activeTarget = '@broadcast';
   }
@@ -321,6 +456,18 @@ function closeModal() {
 async function createChannel(channel) {
   const c = normalizeChannel(channel);
   if (!c || c === '@broadcast') return;
+  if (c.startsWith('#')) {
+    const resolved = await resolveDirectTarget(c);
+    if (!resolved) return;
+    const target = `#${resolved}`;
+    if (!state.directTargets.includes(target)) {
+      state.directTargets.push(target);
+      persistDirectTargets();
+    }
+    switchTarget(target);
+    await refreshRooms();
+    return;
+  }
   const key = c.slice(1);
   await set(ref(state.db, `rooms/${key}`), { created_at: Date.now(), created_by: state.userId });
   switchTarget(c);
@@ -329,16 +476,43 @@ async function createChannel(channel) {
 async function deleteChannel(channel) {
   const c = normalizeChannel(channel);
   if (!c || c === '@broadcast') return;
+  if (c.startsWith('#')) {
+    state.directTargets = state.directTargets.filter((x) => x !== c);
+    persistDirectTargets();
+    state.chatCache[c] = [];
+    delete state.unread[c];
+    if (state.activeTarget === c) switchTarget('@broadcast');
+    await refreshRooms();
+    return;
+  }
+  const ok = window.confirm(`Delete ${c}? This cannot be undone.`);
+  if (!ok) return;
   const key = c.slice(1);
-  await remove(ref(state.db, `rooms/${key}`));
-  await remove(ref(state.db, `messages/chan_${key}`));
+  await Promise.all([
+    remove(ref(state.db, `rooms/${key}`)),
+    remove(ref(state.db, `messages/chan_${key}`)),
+  ]);
+  state.chatCache[c] = [];
+  delete state.unread[c];
   if (state.activeTarget === c) switchTarget('@broadcast');
+  await refreshRooms();
 }
 
 async function renameChannel(oldChannel, newChannel) {
   const oldC = normalizeChannel(oldChannel);
   const newC = normalizeChannel(newChannel);
   if (!oldC || !newC || oldC === '@broadcast' || newC === '@broadcast') return;
+  if (oldC.startsWith('#')) {
+    const resolved = newC.startsWith('#') ? await resolveDirectTarget(newC) : '';
+    if (!resolved) return;
+    const next = `#${resolved}`;
+    state.directTargets = state.directTargets.filter((x) => x !== oldC);
+    if (!state.directTargets.includes(next)) state.directTargets.push(next);
+    persistDirectTargets();
+    if (state.activeTarget === oldC) switchTarget(next);
+    await refreshRooms();
+    return;
+  }
   if (oldC === newC) return;
   const oldKey = oldC.slice(1);
   const newKey = newC.slice(1);
@@ -364,8 +538,6 @@ function wireEvents() {
   });
 
   el.btnCreate.addEventListener('click', () => openModal('create'));
-  el.btnRename.addEventListener('click', () => openModal('rename'));
-  el.btnDelete.addEventListener('click', () => openModal('delete'));
 
   el.chatModalCancel.addEventListener('click', closeModal);
   el.chatModalConfirm.addEventListener('click', async () => {
@@ -417,6 +589,29 @@ function wireEvents() {
       if (card) el.sidebar.classList.remove('open');
     });
   }
+  if (el.chatMenuRename) {
+    el.chatMenuRename.addEventListener('click', () => {
+      if (!contextChannel) return;
+      closeChatMenu();
+      openModal('rename');
+      el.chatModalName.value = contextChannel;
+    });
+  }
+  if (el.chatMenuDelete) {
+    el.chatMenuDelete.addEventListener('click', async () => {
+      if (!contextChannel) return;
+      const target = contextChannel;
+      closeChatMenu();
+      await deleteChannel(target);
+      await refreshRooms();
+    });
+  }
+  window.addEventListener('click', (event) => {
+    if (!el.chatMenu?.classList.contains('open')) return;
+    if (!event.target.closest('#chat-menu')) {
+      closeChatMenu();
+    }
+  });
 
   el.settingsSave.addEventListener('click', () => {
     const nextName = String(el.settingsName.value || '').trim();
@@ -440,12 +635,19 @@ function wireEvents() {
 wireEvents();
 applySidebarState();
 updateConnectionUi();
-if (state.username) {
-  bootstrap();
-} else {
-  settingsMode = 'welcome';
-  if (el.settingsTitle) el.settingsTitle.textContent = 'Welcome';
-  if (el.settingsCancel) el.settingsCancel.textContent = 'Skip';
-  if (el.settingsSave) el.settingsSave.textContent = 'Enter';
-  el.settingsOverlay.classList.add('open');
+if (el.authContinue) {
+  el.authContinue.addEventListener('click', () => {
+    completeAuthGate();
+  });
 }
+if (el.authPassword) {
+  el.authPassword.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') completeAuthGate();
+  });
+}
+if (el.authUsername) {
+  el.authUsername.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') completeAuthGate();
+  });
+}
+initAuthGate();

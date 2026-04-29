@@ -23,6 +23,15 @@
         ".validate": "newData.val() === null || (newData.hasChildren(['password','peer_id']) && newData.child('password').isString() && newData.child('password').val().length === 64 && newData.child('peer_id').isString() && newData.child('peer_id').val().length <= 128)"
       }
     },
+    "user_channels": {
+      ".read": true,
+      "$username": {
+        ".write": "true",
+        "$room": {
+          ".validate": "newData.val() === null || (newData.hasChildren(['joined_at']) && newData.child('joined_at').isNumber())"
+        }
+      }
+    },
     "messages": {
       "$chatKey": {
         ".read": true,
