@@ -74,3 +74,19 @@ echo "Run:"
 echo "  ${INSTALL_DIR}/hermes"
 echo "  ${INSTALL_DIR}/hermes-server --port 7777"
 echo "  ${INSTALL_DIR}/web-ui --port 8080"
+echo ""
+
+if [[ "${1:-}" == "--system-wide" ]]; then
+  echo "Configuring system-wide commands in /usr/local/bin ..."
+  sudo ln -sf "${INSTALL_DIR}/hermes" /usr/local/bin/hermes
+  sudo ln -sf "${INSTALL_DIR}/hermes-server" /usr/local/bin/hermes-server
+  sudo ln -sf "${INSTALL_DIR}/web-ui" /usr/local/bin/web-ui
+  echo "Done. You can now run: hermes"
+else
+  echo "Optional system-wide setup:"
+  echo "  bash /tmp/install_hermes.sh --system-wide"
+  echo "Or manual links:"
+  echo "  sudo ln -sf ${INSTALL_DIR}/hermes /usr/local/bin/hermes"
+  echo "  sudo ln -sf ${INSTALL_DIR}/hermes-server /usr/local/bin/hermes-server"
+  echo "  sudo ln -sf ${INSTALL_DIR}/web-ui /usr/local/bin/web-ui"
+fi

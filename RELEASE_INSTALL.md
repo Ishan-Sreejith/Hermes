@@ -9,6 +9,12 @@ curl -fsSL https://raw.githubusercontent.com/Ishan-Sreejith/Hermes/main/scripts/
 bash /tmp/install_hermes.sh
 ```
 
+System-wide command setup (`hermes` in PATH):
+
+```bash
+bash /tmp/install_hermes.sh --system-wide
+```
+
 ## Windows (PowerShell)
 
 ```powershell
